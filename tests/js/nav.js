@@ -58,6 +58,19 @@ function browsing(history) {
     return p
 }
 
+// What Enter did with one row, as one line: the directory it navigated to, the preview it opened,
+// and the path it handed the opener. Exactly one of the three may be filled for any row.
+function entered(row) {
+    var p = pane()
+    var went = ["", "", ""]
+    p.rowFor = function (index) { return row }
+    p.join = function (base, name) { return base + "/" + name }
+    p.open = function (target) { went[0] = target }
+    p.preview = { open: function (path, icon, size) { went[1] = path + " " + icon + " " + size } }
+    Nav.openCursor(p, { open: function (path) { went[2] = path } })
+    return went.join("|")
+}
+
 // The two readings a crumb check makes: what the bar draws, and where each piece would take you.
 function drawn(list) {
     return list.map(function (c) { return c.text }).join("")
@@ -245,4 +258,14 @@ function run(check) {
           Nav.renameRefreshTarget(clicked, "/d/new.txt"), "")
     check("and the flag is one shot, so the next rename reveals again",
           Nav.renameRefreshTarget(clicked, "/d/new.txt"), "/d/new.txt")
+
+    // The operator's 0.1.4 ruling: Enter on an archive opens Flea's own view rather than handing the
+    // file to this box's default for every archive type it can name, which is Nautilus.
+    check("Enter on an archive opens Flea's own preview and launches nothing",
+          entered({ n: "backup.zip", i: "package-x-generic", s: 4096 }),
+          "|/home/gm/backup.zip package-x-generic 4096|")
+    // The two answers that must not move, or the archive route would be a rewrite rather than a route.
+    check("a directory still navigates and every other row still goes to the opener",
+          entered({ n: "Work", d: true }) + " / " + entered({ n: "notes.txt", i: "text-x-generic", s: 12 }),
+          "/home/gm/Work|| / ||/home/gm/notes.txt")
 }

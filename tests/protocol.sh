@@ -444,6 +444,162 @@ check "an archive op that names neither is refused by name" "op must be compress
 check "and the refusal names the op it was given" "bogus" "$(echo "$out" | grep -oE '"path":"[^"]*"' | head -1 | cut -d'"' -f4)"
 check "and no job was started for it" "0" "$(echo "$out" | grep -c '"t":"archivestarted"')"
 
+# Issue 68: the listed directory is watched, so a change made from outside answers a changed line.
+# The only unsolicited line on the wire, so every case here is driven by a real create, rename or
+# delete landing between two requests rather than by a request asking for it.
+WT_SB="$FIXTURE_ROOT/flea-watch-test-$$"
+WT="$WT_SB/tree"
+OTHER="$WT_SB/other"
+sandbox_make "$WT_SB"
+mkdir -p "$WT" "$OTHER"
+printf 'a' > "$WT/alpha.txt"
+
+# The change runs argv-direct between the list and the quit, which is where an outside write lands.
+watch_run() {
+  local dir="$1"
+  shift
+  ( printf '{"c":"list","path":"%s","first":10}\n' "$dir"
+    sleep 0.4
+    "$@"
+    sleep 0.6
+    printf '{"c":"quit"}\n'
+  ) | $BIN --backend
+}
+
+# One create can wake the reader once or twice (the create, then the close and the timestamp), so
+# the assertion is that the wire said something and did not say it per event, never an exact count.
+check_changed() {
+  local label="$1" out="$2" low="$3" high="$4"
+  local n
+  n=$(echo "$out" | grep -c '"t":"changed"')
+  [ "$n" -ge "$low" ] && [ "$n" -le "$high" ]
+  check "$label (saw $n)" "0" "$?"
+}
+
+burst_of_creates() {
+  local i
+  for i in $(seq 1 100); do
+    : > "$WT/burst-$i.txt"
+  done
+}
+
+out=$(watch_run "$WT" touch "$WT/created.txt")
+check_changed "a create from outside answers a changed line" "$out" 1 3
+check "and that line names the directory being listed" "$WT" "$(echo "$out" | grep '"t":"changed"' | head -1 | grep -oE '"path":"[^"]*"' | cut -d'"' -f4)"
+check "and the listing itself is not re-sent, because the client asks for that" "1" "$(echo "$out" | grep -c '"t":"listed"')"
+
+out=$(watch_run "$WT" mv "$WT/created.txt" "$WT/renamed.txt")
+check_changed "a rename from outside answers a changed line" "$out" 1 3
+
+out=$(watch_run "$WT" rm -f "$WT/renamed.txt")
+check_changed "a delete from outside answers a changed line" "$out" 1 3
+
+out=$(watch_run "$WT" mkdir "$WT/made")
+check_changed "a new directory from outside answers a changed line" "$out" 1 3
+rmdir "$WT/made"
+
+# The negative control, which is what proves the watch is on the listed directory and not on the box.
+out=$(watch_run "$WT" touch "$OTHER/elsewhere.txt")
+check_changed "a change in a directory that is not listed answers nothing" "$out" 0 0
+
+# Navigating drops the old watch. Without the descriptor check in src/backend/watch.rs the removal's
+# own IN_IGNORED would answer here, so this case reddens on exactly the bug it was written for.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.4
+         printf '{"c":"list","path":"%s","first":10}\n' "$OTHER"
+         sleep 0.6
+         touch "$WT/after-leaving.txt"
+         sleep 0.6
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check_changed "a change in the directory just left answers nothing" "$out" 0 0
+check "and moving to a new directory answers nothing on its own" "2" "$(echo "$out" | grep -c '"t":"listed"')"
+
+# A search replaces the listing with matches, which are not a directory, so nothing is watched. The
+# list comes first on purpose: without a watch to stop, this case passes with the stop deleted.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.4
+         printf '{"c":"search","path":"%s","query":"alpha"}\n' "$WT"
+         sleep 0.6
+         touch "$WT/during-search.txt"
+         sleep 0.6
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check_changed "a change under a search answers nothing, because matches are not a directory" "$out" 0 0
+
+# listpaths lists a set the client named, whose base is the root; watching that would be a lie.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.4
+         printf '{"c":"listpaths","paths":["%s/alpha.txt"],"first":10}\n' "$WT"
+         sleep 0.6
+         touch "$WT/during-listpaths.txt"
+         sleep 0.6
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check_changed "a change under listpaths answers nothing, because named paths are not a directory" "$out" 0 0
+
+# One bit of MASK each, isolated: a chmod is IN_ATTRIB alone, and appending to a file that already
+# exists is IN_CLOSE_WRITE alone, since IN_MODIFY is deliberately not in the mask.
+append_to_alpha() {
+  printf 'x' >> "$WT/alpha.txt"
+}
+
+out=$(watch_run "$WT" chmod 0640 "$WT/alpha.txt")
+check_changed "a chmod from outside answers a changed line" "$out" 1 3
+chmod 0644 "$WT/alpha.txt"
+
+out=$(watch_run "$WT" append_to_alpha)
+check_changed "a writer closing a file it appended to answers a changed line" "$out" 1 3
+
+# The watched directory itself: a move keeps the watch, which IN_MOVE_SELF is what reports, and a
+# delete takes the watch with it, which the kernel reports as IN_IGNORED whatever the mask holds.
+SELFDIR="$WT_SB/self-move"
+mkdir -p "$SELFDIR"
+out=$(watch_run "$SELFDIR" mv "$SELFDIR" "$WT_SB/self-moved")
+check_changed "moving the watched directory itself answers a changed line" "$out" 1 3
+
+SELFDEL="$WT_SB/self-delete"
+mkdir -p "$SELFDEL"
+out=$(watch_run "$SELFDEL" rmdir "$SELFDEL")
+check_changed "deleting the watched directory answers a changed line, from the watch's own removal" "$out" 1 3
+
+# A failed list answers its error and the directory still on screen keeps answering changed. Two changes
+# a burst apart, because a watch the failure took away answers the one line its own removal made.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.4
+         printf '{"c":"list","path":"/no/such/directory","first":10}\n'
+         sleep 0.4
+         touch "$WT/after-a-failed-list-one.txt"
+         sleep 1.0
+         touch "$WT/after-a-failed-list-two.txt"
+         sleep 0.8
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check "a failed list still answers its error" "1" "$(echo "$out" | grep -c '"t":"error"')"
+check_changed "and the directory still on screen is still watched after it" "$out" 2 4
+
+# inotify answers the descriptor it already holds, so a commit that dropped it would unwatch the folder.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.5
+         printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 1.5
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check_changed "re-listing the same directory answers nothing on its own" "$out" 0 0
+
+# Two changes, a second apart so each is its own burst: a dead watch answers the one spurious line
+# its own removal made and nothing else, which one change alone could not be told apart from.
+out=$( ( printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.5
+         printf '{"c":"list","path":"%s","first":10}\n' "$WT"
+         sleep 0.5
+         touch "$WT/after-a-relist-one.txt"
+         sleep 1.0
+         touch "$WT/after-a-relist-two.txt"
+         sleep 0.8
+         printf '{"c":"quit"}\n' ) | $BIN --backend)
+check_changed "and two changes after that re-list are both answered" "$out" 2 4
+
+# A burst is coalesced by the reader, so a hundred creates cost a handful of lines, not a hundred.
+out=$(watch_run "$WT" burst_of_creates)
+check_changed "a hundred creates answer a handful of changed lines, not a hundred" "$out" 1 10
+sandbox_remove "$WT_SB"
+
 # No per-key cleanup: the cache is inside the sandbox, so it goes when the sandbox does.
 sandbox_remove "$SB"
 exit $fail

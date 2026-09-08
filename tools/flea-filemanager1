@@ -1,0 +1,242 @@
+#!/usr/bin/python3
+
+# Flea's answer to org.freedesktop.FileManager1, the interface a desktop's "Show in folder" goes
+# through: Chromium's own is one ShowItems call on this name, and with nothing of Flea's owning it
+# the call activated Nautilus instead, which is issue 54.
+#
+# Python and gi rather than Rust, alongside tools/flea-portal and tools/flea-gio-auth: a D-Bus
+# service has to own a name, export an object and answer method calls, and this crate has no
+# dependencies at all, so the Rust answer was a hand-rolled D-Bus marshaller. python-gobject is
+# already a Flea dependency, because tools/flea-portal is written against it.
+#
+# Every window this opens is one `flea --select` or one `flea <dir>`. The reveal already resolves a
+# file:// URI to its parent and puts the cursor on the entry, so this service decides which URIs are
+# worth handing it and nothing else.
+
+import os
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+BUS_NAME = "org.freedesktop.FileManager1"
+# The path the interface fixes, and the one every caller builds its proxy against.
+OBJECT_PATH = "/org/freedesktop/FileManager1"
+IFACE = "org.freedesktop.FileManager1"
+
+# With no window of its own there is nothing to keep this process for, and D-Bus starts it again on
+# the next call. The same wait tools/flea-portal takes, so two calls in a row pay activation once.
+IDLE_EXIT_SEC = 30
+
+# The three methods the interface defines. Each takes the URIs and a startup id and returns nothing:
+# a caller learns of a refusal from the error reply, which is the only channel the signature leaves.
+INTROSPECTION = """
+<node>
+  <interface name='org.freedesktop.FileManager1'>
+    <method name='ShowFolders'>
+      <arg type='as' name='URIs' direction='in'/>
+      <arg type='s' name='StartupId' direction='in'/>
+    </method>
+    <method name='ShowItems'>
+      <arg type='as' name='URIs' direction='in'/>
+      <arg type='s' name='StartupId' direction='in'/>
+    </method>
+    <method name='ShowItemProperties'>
+      <arg type='as' name='URIs' direction='in'/>
+      <arg type='s' name='StartupId' direction='in'/>
+    </method>
+  </interface>
+</node>
+"""
+
+
+def say(message):
+    print("flea-filemanager1: %s" % message, file=sys.stderr, flush=True)
+
+
+def flea_binary():
+    # FLEA_BIN is the dev seam ui/Backend.qml and tools/flea-portal already read; the dev tree keeps
+    # target/ beside tools/.
+    chosen = os.environ.get("FLEA_BIN", "")
+    if chosen:
+        return chosen
+    here = os.path.dirname(os.path.abspath(__file__))
+    dev = os.path.join(os.path.dirname(here), "target", "release", "flea")
+    if os.access(dev, os.X_OK):
+        return dev
+    return "/usr/bin/flea"
+
+
+# The URIs come from another application, so each one is proved before it becomes a path. Measured
+# on this box with PyGObject 3.56.3: a D-Bus `as` unpacks to a list of str, and
+# GLib.filename_from_uri refuses a foreign scheme, a relative URI and a %00, but accepts both a
+# foreign authority and a %0A. The decoder is glib's own; the two rules it does not carry are here.
+# Sample input: file:///home/gm/Downloads/caf%C3%A9.pdf
+def path_for(uri):
+    if not isinstance(uri, str):
+        return None, "a URI that is not a string"
+    try:
+        path, host = GLib.filename_from_uri(uri)
+    except GLib.Error as error:
+        return None, error.message
+    if host not in (None, "", "localhost"):
+        return None, "%s names the host %s, and only this machine's files can be shown" % (uri, host)
+    if any(ord(c) < 32 or ord(c) == 127 for c in path):
+        return None, "%s decodes to a path with a control character in it" % uri
+    return path, ""
+
+
+# A reveal names one row, so two files in one directory are one window: `flea --select` can only put
+# the cursor on one of them. The first URI named under a directory is the one its window selects.
+def items_to_show(uris):
+    targets = {}
+    for uri in uris:
+        path, why = path_for(uri)
+        if path is None:
+            say("that URI was refused (%s)" % why)
+            continue
+        parent = os.path.dirname(path)
+        if not parent or parent == path:
+            say("%s has no parent directory to open" % path)
+            continue
+        # lexists, not exists: a broken symlink is still a row Flea can put the cursor on.
+        if not os.path.lexists(path):
+            say("%s is not there any more, so there is nothing to select" % path)
+            continue
+        targets.setdefault(parent, ["--select", path])
+    return list(targets.values())
+
+
+def folders_to_show(uris):
+    targets = {}
+    for uri in uris:
+        path, why = path_for(uri)
+        if path is None:
+            say("that URI was refused (%s)" % why)
+            continue
+        if not os.path.isdir(path):
+            say("%s is not a directory, so there is no folder to open" % path)
+            continue
+        targets.setdefault(path, [path])
+    return list(targets.values())
+
+
+class Service:
+    def __init__(self, loop):
+        self.loop = loop
+        self.owner = 0
+        self.idle_source = 0
+        node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION)
+        self.info = node.lookup_interface(IFACE)
+
+    def on_bus_acquired(self, connection, _name):
+        connection.register_object(OBJECT_PATH, self.info, self.on_call, None, None)
+        self.arm_idle_exit()
+
+    def on_name_lost(self, _connection, _name):
+        say("another process owns %s, so this one has nothing to answer" % BUS_NAME)
+        self.loop.quit()
+
+    def on_call(self, _connection, _sender, _path, iface, method, params, invocation):
+        if iface != IFACE or method not in ("ShowFolders", "ShowItems", "ShowItemProperties"):
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod",
+                                         "flea-filemanager1 answers FileManager1 only")
+            return
+        self.cancel_idle_exit()
+        # corner: the startup id is read off the wire and dropped. Chromium sends an xdg-activation
+        # token here and Hyprland focuses a new window anyway, measured against the real call.
+        try:
+            self.answer(method, params.unpack()[0], invocation)
+        finally:
+            self.arm_idle_exit()
+
+    def answer(self, method, uris, invocation):
+        # Flea has no properties dialog. Opening the browser window instead would answer a different
+        # question than the caller asked, and a reply that did nothing at all would be worse still.
+        if method == "ShowItemProperties":
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.NotSupported",
+                                         "Flea has no properties dialog, so it cannot show properties")
+            return
+        wanted = items_to_show(uris) if method == "ShowItems" else folders_to_show(uris)
+        if not wanted:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs",
+                                         "no URI in that call named a local path Flea could open")
+            return
+        for args in wanted:
+            if not self.open_window(args, invocation):
+                return
+        invocation.return_value(None)
+
+    # One window, launched and not waited on: the reply is void, so a caller held until the window
+    # closed would be held for as long as the user reads the directory.
+    def open_window(self, args, invocation):
+        launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE)
+        try:
+            child = launcher.spawnv([flea_binary()] + args)
+        except GLib.Error as error:
+            say("the window did not start (%s)" % error.message)
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.Failed",
+                                         "Flea could not be started to show that")
+            return False
+        child.wait_async(None, self.on_child_exit)
+        return True
+
+    # PyGObject calls an async callback with user data only when it was given, so the third
+    # parameter defaults rather than making the arity a guess.
+    def on_child_exit(self, child, result, _data=None):
+        try:
+            child.wait_finish(result)
+        except GLib.Error as error:
+            say("the window could not be waited on (%s)" % error.message)
+            return
+        status = child.get_exit_status() if child.get_if_exited() else -1
+        if status != 0:
+            say("the window exited %s, so nothing was shown" % status)
+
+    def arm_idle_exit(self):
+        self.cancel_idle_exit()
+        self.idle_source = GLib.timeout_add_seconds(IDLE_EXIT_SEC, self.on_idle)
+
+    def cancel_idle_exit(self):
+        if self.idle_source:
+            GLib.source_remove(self.idle_source)
+            self.idle_source = 0
+
+    # The name goes back before the process does, and the quit waits half a second behind it: a call
+    # that arrives after the release activates a fresh instance instead of reaching a dead one.
+    def on_idle(self):
+        self.idle_source = 0
+        if self.owner:
+            Gio.bus_unown_name(self.owner)
+            self.owner = 0
+        GLib.timeout_add(500, self.on_quit)
+        return GLib.SOURCE_REMOVE
+
+    def on_quit(self):
+        self.loop.quit()
+        return GLib.SOURCE_REMOVE
+
+
+def main():
+    loop = GLib.MainLoop()
+    service = Service(loop)
+    service.owner = Gio.bus_own_name(
+        Gio.BusType.SESSION,
+        BUS_NAME,
+        Gio.BusNameOwnerFlags.NONE,
+        service.on_bus_acquired,
+        None,
+        service.on_name_lost,
+    )
+    try:
+        loop.run()
+    finally:
+        if service.owner:
+            Gio.bus_unown_name(service.owner)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

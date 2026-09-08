@@ -137,9 +137,9 @@ function runRows(check) {
           Settings.rows("display", displayState(TextSize.follow(), 13))[2].index, 3)
     check("the hint names every stop the override can take",
           display[3].label.indexOf("9, 10, 11, 12, 14, 16, 20 px") >= 0, true)
-    check("the monitor scale is drawn as the compositor reports it", display[5].value, "1x")
+    check("the monitor scale is drawn read-only, as the compositor reports it", display[5].value, "Read-only 1x")
     check("a fractional one keeps its fraction",
-          Settings.rows("display", displayState(TextSize.follow(), 14, 1.25))[5].value, "1.25x")
+          Settings.rows("display", displayState(TextSize.follow(), 14, 1.25))[5].value, "Read-only 1.25x")
     check("and an unanswered query says so rather than claiming 1x",
           Settings.rows("display", displayState(TextSize.follow(), 14, 0))[5].value, "not reported")
     check("its hint is the board's own sentence, so no reader expects a control",
@@ -190,6 +190,10 @@ function runRows(check) {
     var keys = Settings.rows("keys", { preset: "mac", presetKeys: Keymap.PRESET_KEYS })
     check("the Keys section leads with the preset choice", keys[1].kind, "choice")
     check("and shows the selected preset by name", keys[1].value, "Mac")
+    // The board draws all four on the control, and SettingsRow needs options.length > 1 to draw a
+    // segment at all, so a chevron here is the defect: it names one value and hides the other three.
+    check("the preset row draws all four as a segment, in the chooser's own order",
+          (keys[1].options || []).join("|"), "Default|Vim|Mac|Windows")
     check("the Windows preset is shown by name too",
           Settings.rows("keys", { preset: "windows", presetKeys: Keymap.PRESET_KEYS })[1].value,
           "Windows")
@@ -221,13 +225,25 @@ function runCursor(check) {
           Settings.stepRow(pinned, 2, 1), 2)
 }
 
-// The two-value toggle over the one key table. Each row the Keys section lists is resolved back
-// through the generated overlay, so a listed chord cannot advertise a binding the preset lacks.
+// SettingsKeys.html's four-value chooser over the one key table. Each row the Keys section lists is
+// resolved back through the generated overlay, so a listed chord cannot advertise a binding the
+// preset lacks, and every one of the four claims a chord rather than drawing a heading over nothing.
 function runPresets(check) {
-    check("there are exactly two presets, which is what the public list named",
-          Settings.PRESETS.join(","), "mac,windows")
-    check("both are named for the panel", Settings.PRESET_LABELS.mac + "," + Settings.PRESET_LABELS.windows,
-          "Mac,Windows")
+    check("the chooser offers the board's four presets, in its own order",
+          Settings.PRESETS.join(","), "default,vim,mac,windows")
+    check("each is named for the panel",
+          Settings.PRESETS.map(function (id) { return Settings.PRESET_LABELS[id] }).join(","),
+          "Default,Vim,Mac,Windows")
+    // ui/ViewState.qml resolves an unrecognised stored name to PRESETS[0], so the order carries the
+    // board's rule that a missing or unknown value falls back to Default and not to Mac.
+    check("and the first is Default, which is what an unrecognised stored name falls back to",
+          Settings.PRESETS[0], "default")
+    var claiming = {}
+    for (var c = 0; c < Keymap.PRESET_KEYS.length; c++)
+        claiming[Keymap.PRESET_KEYS[c].preset] = true
+    check("every preset in the chooser claims a chord of its own, which is GM's ruling of 2026-09-06",
+          Settings.PRESETS.map(function (id) { return claiming[id] === true }).join(","),
+          "true,true,true,true")
     var listed = 0
     for (var i = 0; i < Keymap.PRESET_KEYS.length; i++) {
         var row = Keymap.PRESET_KEYS[i]
@@ -241,4 +257,38 @@ function runPresets(check) {
           Keymap.lookupPreset("windows", Qt.Key_1, "", Qt.ControlModifier), "")
     check("and a Windows chord is dead under Mac",
           Keymap.lookupPreset("mac", Qt.Key_H, "", Qt.ControlModifier), "")
+    check("Default and Vim spell view switching the way Mac does, and claim nothing else",
+          [Keymap.lookupPreset("default", Qt.Key_1, "", Qt.ControlModifier),
+           Keymap.lookupPreset("default", Qt.Key_H, "", Qt.ControlModifier),
+           Keymap.lookupPreset("vim", Qt.Key_1, "", Qt.ControlModifier)].join("|"),
+          "viewList||viewList")
+
+    // The five actions the overlay governs that no preset needs a chord for, asked under every one
+    // of the four: an overlay row can shadow a shared key, so "the shared table carries it" is a
+    // claim to check per preset rather than once. The three views have no shared key at all and are
+    // checked in tests/js/keymap.js, where every preset's own spelling of them is resolved.
+    var reach = []
+    var opened = Keymap.preset
+    for (var q = 0; q < Settings.PRESETS.length; q++) {
+        Keymap.setPreset(Settings.PRESETS[q])
+        reach.push([Keymap.lookup(Qt.Key_Backspace, "", Qt.NoModifier),
+                    Keymap.lookup(Qt.Key_Return, "", Qt.NoModifier),
+                    Keymap.lookup(Qt.Key_Delete, "", Qt.NoModifier),
+                    Keymap.lookup(Qt.Key_Period, ".", Qt.NoModifier),
+                    Keymap.lookup(Qt.Key_A, "a", Qt.NoModifier)].join("|"))
+    }
+    Keymap.setPreset(opened)
+    check("every preset reaches the overlay's other five actions on a shared key",
+          reach.join(" / "),
+          "parent|open|trash|toggleHidden|addNetwork / parent|open|trash|toggleHidden|addNetwork / "
+          + "parent|open|trash|toggleHidden|addNetwork / parent|open|trash|toggleHidden|addNetwork")
+
+    var section = function (id) { return Settings.rows("keys", { preset: id, presetKeys: Keymap.PRESET_KEYS }) }
+    var chords = function (rows) { return rows.filter(function (r) { return r.kind === "fact" }).length }
+    check("the Keys section names each preset the way the chooser does",
+          [section("default")[1].value, section("vim")[1].value, section("mac")[1].value,
+           section("windows")[1].value].join(","), "Default,Vim,Mac,Windows")
+    check("each preset lists every chord it claims, and none of them lists an empty group",
+          [chords(section("default")), chords(section("vim")), chords(section("mac")),
+           chords(section("windows"))].join(","), "3,3,7,4")
 }

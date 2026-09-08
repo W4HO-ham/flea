@@ -100,12 +100,24 @@ def flag_option(options, key):
     return options.get(key) is True
 
 
-def path_option(options, key):
-    # current_folder and current_file are NUL-terminated bytestrings, not strings.
-    value = options.get(key)
-    if not isinstance(value, bytes):
+# current_folder, current_file and each files element are D-Bus `ay`, which PyGObject 3.56.3 on
+# Python 3.14 unpacks as a list of ints and older ones as bytes; anything else is refused, not guessed.
+def bytestring(value):
+    if isinstance(value, bytes):
+        raw = value
+    elif isinstance(value, list):
+        # bytes() is the range and type check: a non-int raises TypeError, one outside 0-255 ValueError.
+        try:
+            raw = bytes(value)
+        except (TypeError, ValueError):
+            return ""
+    else:
         return ""
-    return value.split(b"\0", 1)[0].decode("utf-8", "replace")
+    return raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+
+
+def path_option(options, key):
+    return bytestring(options.get(key))
 
 
 # Sample input: [('Images', [(0, '*.png'), (1, 'image/jpeg')])], where 0 is a glob and 1 a mime type.
@@ -145,7 +157,7 @@ def request_for(method, title, app_id, options):
         "folder": path_option(options, "current_folder"),
         "file": path_option(options, "current_file"),
         "name": text_option(options, "current_name"),
-        "files": [name.split(b"\0", 1)[0].decode("utf-8", "replace") for name in files] if isinstance(files, list) else [],
+        "files": [bytestring(name) for name in files] if isinstance(files, list) else [],
         "filters": filters_option(options, "filters"),
         "current": current_filter_label(options),
     }

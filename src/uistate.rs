@@ -210,6 +210,19 @@ mod tests {
         assert_eq!(merged.get("hidden").and_then(Json::as_bool), Some(true));
     }
 
+    // SettingsKeys.html: a missing or unrecognised preset falls back to Default, discarding nothing.
+    #[test]
+    fn a_stored_preset_this_build_cannot_honour_reads_back_as_default() {
+        assert_eq!(from_file("{}").get("keys").and_then(Json::as_str), Some("default"));
+        for stored in ["default", "vim", "mac", "windows"] {
+            let kept = from_file(&format!(r#"{{"keys":"{}"}}"#, stored));
+            assert_eq!(kept.get("keys").and_then(Json::as_str), Some(stored), "{} is a shipped preset", stored);
+        }
+        let merged = from_file(r#"{"keys":"emacs","hidden":true}"#);
+        assert_eq!(merged.get("keys").and_then(Json::as_str), Some("default"));
+        assert_eq!(merged.get("hidden").and_then(Json::as_bool), Some(true), "the bad name costs only its own key");
+    }
+
     #[test]
     fn a_bad_nested_value_costs_its_own_leaf_and_not_its_siblings() {
         let merged = from_file(r#"{"places":{"showHome":"yes","showTrash":false,"sidebarWidth":0}}"#);

@@ -33,8 +33,8 @@ const MAGIC: &[(i64, &str)] = &[
     (0x1CD1, "devpts"),
 ];
 
-// struct statfs on linux x86-64: the fields this needs are f_type, f_bsize and f_bavail, and the
-// rest is padding this never reads. Sizes are from man 2 statfs.
+// struct statfs on linux, byte-identical on x86-64 and aarch64 (120 bytes, f_bavail at 32): the
+// fields this needs are f_type, f_bsize and f_bavail, and the rest is padding this never reads.
 #[repr(C)]
 struct StatFs {
     f_type: i64,

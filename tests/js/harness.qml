@@ -29,6 +29,7 @@ import "protocols.js" as ProtocolsSuite
 import "railkeys.js" as RailKeysSuite
 import "recent.js" as RecentSuite
 import "renderer.js" as RendererSuite
+import "scroll.js" as ScrollSuite
 import "search.js" as SearchSuite
 import "selection.js" as SelectionSuite
 import "settings.js" as SettingsSuite
@@ -40,6 +41,7 @@ import "tap.js" as TapSuite
 import "tabs.js" as TabsSuite
 import "thumbs.js" as ThumbsSuite
 import "uistate.js" as UiStateSuite
+import "watch.js" as WatchSuite
 
 Item {
     Component.onCompleted: {
@@ -70,11 +72,12 @@ Item {
             ["protocols", ProtocolsSuite], ["railkeys", RailKeysSuite],
             ["recent", RecentSuite],
             ["renderer", RendererSuite],
-            ["search", SearchSuite],
+            ["scroll", ScrollSuite], ["search", SearchSuite],
             ["selection", SelectionSuite], ["settings", SettingsSuite],
             ["sort", SortSuite], ["taildrop", TaildropSuite], ["textsize", TextSizeSuite],
             ["trash", TrashSuite], ["tap", TapSuite], ["tabs", TabsSuite],
-            ["thumbs", ThumbsSuite], ["uistate", UiStateSuite]
+            ["thumbs", ThumbsSuite], ["uistate", UiStateSuite],
+            ["watch", WatchSuite]
         ]
         var argv = Qt.application.arguments
         var only = ""

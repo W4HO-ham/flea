@@ -104,7 +104,7 @@ Item {
                 text: Transfer.head(root.shown)
                 color: Theme.color.foreground
                 font.family: Theme.font.family
-                font.pixelSize: Theme.font.bodySmall
+                font.pixelSize: Theme.font.body
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
             }
@@ -181,7 +181,7 @@ Item {
                     text: "Cancel"
                     color: Theme.color.muted
                     font.family: Theme.font.family
-                    font.pixelSize: Theme.font.bodySmall
+                    font.pixelSize: Theme.font.body
                     textFormat: Text.PlainText
                 }
 
@@ -189,6 +189,7 @@ Item {
 
                 TapHandler {
                     acceptedButtons: Qt.LeftButton
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
                     onTapped: root.cancel()
                 }
             }
@@ -202,7 +203,7 @@ Item {
                 text: "Cancelling"
                 color: Theme.color.muted
                 font.family: Theme.font.family
-                font.pixelSize: Theme.font.bodySmall
+                font.pixelSize: Theme.font.body
                 textFormat: Text.PlainText
             }
         }

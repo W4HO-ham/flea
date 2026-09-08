@@ -227,6 +227,7 @@ print("over=" + reserve(OVER_MIB))
 
     #[test]
     fn a_real_sandboxed_child_is_held_to_two_gibibytes_of_address_space() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         // /etc is bound read-only already, so binding a file inside it is the production shape and nothing more.
         let got = sandboxed_output(&[PYTHON, "-c", RESERVE_PROBE], Path::new("/etc/hostname"));
         assert!(got.contains("cap=2147483648"), "the kernel enforced another cap: {}", got);

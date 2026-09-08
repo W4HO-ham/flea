@@ -1,7 +1,7 @@
 # Maintainer: GM <gianmarcomorales@icloud.com>
 
 pkgname=flea
-pkgver=0.1.4
+pkgver=0.1.6
 pkgrel=1
 pkgdesc='Fast, keyboard-first file manager for Omarchy'
 arch=('x86_64' 'aarch64')
@@ -11,16 +11,27 @@ license=('MIT')
 # xdg-terminal-exec is what --terminal execs, so the topbar's terminal button needs it installed.
 # wl-clipboard ships wl-copy, which ui/Opener.qml pipes into for the menu's Copy Path row; nothing
 # else in this closure requires it, so on a clean Omarchy box that row failed silently without it.
-# python-gobject is what tools/flea-portal answers org.freedesktop.impl.portal.FileChooser with; it
-# is the same binding omarchy-file-select, the client that portal serves, is already written against.
-depends=('bubblewrap' 'expect' 'glib2' 'gvfs' 'gvfs-dnssd' 'gvfs-nfs' 'gvfs-smb' 'omarchy' 'python-gobject' 'quickshell' 'shared-mime-info' 'util-linux' 'wl-clipboard' 'xdg-terminal-exec' 'xdg-utils')
+# python-gobject is what tools/flea-portal answers org.freedesktop.impl.portal.FileChooser with, and
+# what tools/flea-filemanager1 answers org.freedesktop.FileManager1 with; it is the same binding
+# omarchy-file-select, the client that portal serves, is already written against.
+# qt6-webengine ships QtQuick.Pdf and qt6-multimedia ships QtMultimedia, which ui/PreviewPdf.qml and
+# ui/PreviewMedia.qml import: neither is in the omarchy plus quickshell closure, so a clean box
+# installed a Flea whose PDF and media preview could not load at all.
+# gcc-libs and glibc are the binary's only direct links, and hicolor-icon-theme owns the directory
+# the desktop icon is installed into.
+# python is the interpreter of two scripts this package installs and D-Bus activates at runtime, so
+# it is a runtime dependency rather than only the checkdepend the sandboxed child needs.
+# kimageformats with libheif is Qt's HEIC decoder: without it the Space preview of a phone photo is a sentence, not a picture.
+depends=('bubblewrap' 'expect' 'gcc-libs' 'glib2' 'glibc' 'gvfs' 'gvfs-dnssd' 'gvfs-nfs' 'gvfs-smb' 'hicolor-icon-theme' 'kimageformats' 'libheif' 'omarchy' 'python' 'python-gobject' 'qt6-multimedia' 'qt6-webengine' 'quickshell' 'shared-mime-info' 'util-linux' 'wl-clipboard' 'xdg-terminal-exec' 'xdg-utils')
 makedepends=('cargo')
-# check() runs the real sandboxed child, which shells to /usr/bin/python3 to reserve address space.
-checkdepends=('python')
+# Both packages own /usr/bin/flea, so pacman refuses the pair rather than leaving one half-installed.
+conflicts=('flea-git')
 optdepends=('libarchive: archive listing and extraction'
             '7zip: 7z archive support'
             'imagemagick: image conversion'
-            'tailscale: Taildrop sharing')
+            'tailscale: Taildrop sharing'
+            'ffmpeg: media metadata in the preview column'
+            'dropbox-cli: Dropbox share links')
 # The release profile strips, so a debug package would have nothing to hold.
 options=('!debug')
 # Empty on purpose: with no source array makepkg builds from $startdir, so a clone is the source.
@@ -53,6 +64,12 @@ package() {
   install -Dm755 tools/flea-portal "$pkgdir/usr/lib/flea/flea-portal"
   install -Dm644 packaging/flea.portal -t "$pkgdir/usr/share/xdg-desktop-portal/portals"
   install -Dm644 packaging/org.freedesktop.impl.portal.desktop.flea.service -t "$pkgdir/usr/share/dbus-1/services"
+  # org.freedesktop.FileManager1, which is what Chromium's "Show in folder" calls. The file is named
+  # for Flea and not for the interface: nautilus owns the plain org.freedesktop.FileManager1.service
+  # path here, and dolphin, thunar and nemo each ship their own vendor-named file declaring the same
+  # Name=, so a vendor name is the convention and the only way to avoid a pacman file conflict.
+  install -Dm755 tools/flea-filemanager1 "$pkgdir/usr/lib/flea/flea-filemanager1"
+  install -Dm644 packaging/com.thisisgm.flea.FileManager1.service -t "$pkgdir/usr/share/dbus-1/services"
   install -Dm644 packaging/com.thisisgm.flea.desktop -t "$pkgdir/usr/share/applications"
   install -Dm644 packaging/com.thisisgm.flea.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"

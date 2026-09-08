@@ -141,6 +141,7 @@ mod tests {
     // root does not.
     #[test]
     fn only_the_archive_root_extracts_to_nothing_while_nested_directories_do_not() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let d = TestDir::new("archdotonly");
         let formats = Formats::from_tools(true, true);
         d.dir("emptysrc");
@@ -192,6 +193,7 @@ mod tests {
 
     #[test]
     fn an_empty_archive_extracts_to_an_empty_directory_and_that_is_success() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let d = TestDir::new("archempty");
         let formats = Formats::from_tools(true, true);
         let empty = d.join("empty.tar");
@@ -209,6 +211,7 @@ mod tests {
 
     #[test]
     fn the_emptiness_check_reads_the_destination_and_the_index_separately() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let d = TestDir::new("archemptyparts");
         let formats = Formats::from_tools(true, true);
         d.dir("nothing");
@@ -244,6 +247,7 @@ mod tests {
     // That is every part of the integration except extract's own three lines of wiring.
     #[test]
     fn a_tool_that_exits_zero_writing_nothing_is_caught_by_the_predicate() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let d = TestDir::new("archzerowrite");
         let formats = Formats::from_tools(true, true);
         // A real archive holding one member, so the index disagrees with an empty destination.

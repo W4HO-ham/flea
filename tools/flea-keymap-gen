@@ -3,8 +3,10 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-src=keys.toml
+# The second argument is the table to read, so tests/keymap-gen.sh can point the conflict guard
+# below at a deliberately broken copy without editing the one this repo ships.
 out=${1:-ui/js/Keymap.js}
+src=${2:-keys.toml}
 
 [ -f "$src" ] || { echo "flea-keymap-gen: $src is missing" >&2; exit 1; }
 
@@ -98,6 +100,31 @@ preset() {
   done < "$src"
 }
 
+# Sample input: preset() prints 'mac<tab>ctrl<tab>1<tab>ctrl-1<tab>viewList<tab>list view'. This is
+# SettingsKeys.html's "Conflicts fail the build": one preset claiming a chord twice writes two rows
+# into lookupPreset's if-chain and lets the first silently win. The key is the preset with the
+# modifier state and the Qt key, never the printed chord, because that is what the if-chain matches.
+# Two presets may hold the same chord, because only one of them is ever live.
+preset_conflict() {
+  local duplicate want_name want_mods want_key chord actions n m k caps a l
+  duplicate=$(preset | cut -f1,2,3 | LC_ALL=C sort | uniq -d | head -1)
+  [ -n "$duplicate" ] || return 0
+  IFS=$'\t' read -r want_name want_mods want_key <<< "$duplicate"
+  chord=""
+  actions=""
+  while IFS=$'\t' read -r n m k caps a l; do
+    [ "$n" = "$want_name" ] && [ "$m" = "$want_mods" ] && [ "$k" = "$want_key" ] || continue
+    [ -n "$chord" ] || chord=$caps
+    if [ -z "$actions" ]; then
+      actions=$a
+    else
+      actions="$actions and $a"
+    fi
+  done < <(preset)
+  echo "flea-keymap-gen: the $want_name preset claims $chord twice, for $actions" >&2
+  return 1
+}
+
 # Sample input: Return. The cap on the key reads "enter", which is what the boards and the [[sheet]]
 # table both print, so the one Qt name that differs from its own cap is spelled out here.
 cap() {
@@ -149,6 +176,8 @@ if [ -z "$(preset)" ]; then
   exit 1
 fi
 
+preset_conflict || exit 1
+
 bare_file=$(mktemp) || { echo "flea-keymap-gen: could not make a scratch file" >&2; exit 1; }
 trap 'rm -f "$bare_file"' EXIT
 bare_keys > "$bare_file"
@@ -169,11 +198,12 @@ fi
   echo ".pragma library"
   echo
   echo "// Generated from keys.toml by tools/flea-keymap-gen. Do not edit."
-  echo "// The selected Mac/Windows preset. A .pragma library holds one copy per QML engine, so"
+  echo "// The selected keybinding preset. A .pragma library holds one copy per QML engine, so"
   echo "// ui/ViewState.qml sets it once and every caller of lookup() below follows without a"
-  echo "// second wire; an unknown name falls back to mac rather than leaving the map empty."
-  echo "var preset = \"mac\""
-  echo "function setPreset(name) { preset = name === \"windows\" ? \"windows\" : \"mac\" }"
+  echo "// second wire; it is also the validator, resolving a stored name this build does not"
+  echo "// have to default before it gets here, because an unknown name matches no overlay row."
+  echo "var preset = \"default\""
+  echo "function setPreset(name) { preset = name }"
   echo
   echo "// The [[preset]] rows of keys.toml, for ui/SettingsPanel.qml's Keys section. code is the Qt"
   echo "// name the overlay below matches on, so a row here and the binding are the same keys.toml row."

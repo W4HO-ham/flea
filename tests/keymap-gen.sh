@@ -18,6 +18,33 @@ trap 'rm -f "$tmp"; rm -rf "$probe_dir"' EXIT
 
 ./tools/flea-keymap-gen "$tmp" || { echo "FAIL the generator did not run"; exit 1; }
 
+# SettingsKeys.html says conflicts fail the build, and until now they did not: a second mac ctrl-1
+# claiming viewGrid emitted two overlay rows, exited 0, and let the first silently win. The broken
+# table is a copy inside the probe dir, so the one this repo ships is never edited to prove this.
+conflict=$probe_dir/conflict.toml
+cp keys.toml "$conflict"
+cat >> "$conflict" <<'CONFLICT'
+
+[[preset]]
+name = "mac"
+mods = "ctrl"
+key = "1"
+keys = "ctrl-1"
+action = "viewGrid"
+label = "grid view"
+CONFLICT
+if ./tools/flea-keymap-gen "$probe_dir/conflict.js" "$conflict" 2>"$probe_dir/conflict.err"; then
+  echo "FAIL the generator accepted a preset claiming ctrl-1 twice"
+  exit 1
+fi
+if grep -q 'the mac preset claims ctrl-1 twice, for viewList and viewGrid' "$probe_dir/conflict.err"; then
+  echo "ok   a chord claimed twice inside one preset fails the build, naming both actions"
+else
+  echo "FAIL the duplicate chord was refused without naming the preset, the chord and both actions:"
+  cat "$probe_dir/conflict.err"
+  exit 1
+fi
+
 # A mistyped name emits a comparison against undefined, which is false forever and diffs clean.
 if ! command -v qml6 >/dev/null; then
   echo "FAIL qml6 is not installed, cannot check the key names in keys.toml"

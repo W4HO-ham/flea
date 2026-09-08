@@ -1,4 +1,5 @@
 .import "../../ui/js/Focus.js" as Focus
+.import "../../ui/js/Keymap.js" as Keymap
 .import "filterfixture.js" as Fixture
 
 // Focus.lookup is where a key is discarded for being meaningless in the current state, and a wrong
@@ -193,9 +194,12 @@ function run(check) {
     check("m raises the menu in the list too, so the row menu has a key", Focus.lookup(m, pane(closed())), "menu")
 
     // Finder's Cmd+K with Cmd read as Ctrl opens the dialog from either view; the bare a stays a rail
-    // key, because in the list the letter is not bound at all.
+    // key, because in the list the letter is not bound at all. Ctrl+K is the Mac preset's own chord,
+    // so the preset is named here rather than assumed: the map opens on Default, which claims none.
     var ctrl = Qt.ControlModifier
+    Keymap.setPreset("mac")
     check("ctrl k connects to a server from the list", Focus.lookup(key(Qt.Key_K, "\u000b", ctrl), pane(closed())), "addNetwork")
+    Keymap.setPreset("default")
     check("bare a is still nothing in the list", Focus.lookup(key(Qt.Key_A, "a", none), pane(closed())), "")
     var dialled = listPane(true)
     dialled.sidebar = { asked: 0, addRequested: function () { this.asked += 1 } }

@@ -307,6 +307,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_job_never_runs() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let (dir, pool, rx) = pinned("cancel", 601);
         pool.submit(job(MISSING));
         assert_eq!(pool.pending(), 1);
@@ -320,6 +321,7 @@ mod tests {
 
     #[test]
     fn cancel_all_empties_the_queue() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let (dir, pool, _rx) = pinned("cancelall", 602);
         for i in 0..8 {
             pool.submit(job(&format!("/definitely/not/here-{}.jpg", i)));
@@ -333,6 +335,7 @@ mod tests {
 
     #[test]
     fn the_queue_is_bounded_and_drops_the_oldest_rather_than_growing() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let (dir, pool, _rx) = pinned("bounded", 603);
         for i in 0..(MAX_QUEUE * 2) {
             pool.submit(job(&format!("/definitely/not/here-{}.jpg", i)));
@@ -367,6 +370,7 @@ mod tests {
 
     #[test]
     fn a_real_file_round_trips_to_a_stamped_cache_entry() {
+        if crate::backend::sandboxprobe::skipped() { return; }
         let (tx, rx) = channel();
         let dir = root("roundtrip");
         std::fs::create_dir_all(&dir).unwrap();

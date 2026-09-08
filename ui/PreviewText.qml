@@ -14,6 +14,8 @@ Item {
     readonly property bool tooLarge: root.size > root.maxBytes
     property bool readFailed: false
 
+    readonly property Item bodyItem: body
+    function shownText() { return body.text }
     readonly property string status: {
         if (root.tooLarge) return "This file is too large to preview."
         if (root.readFailed) return "This file could not be read."
@@ -31,23 +33,31 @@ Item {
     }
 
     Flickable {
+        id: textFlick
         anchors.fill: parent
         clip: true
         contentWidth: width
         contentHeight: Math.max(height, body.implicitHeight)
         visible: !root.tooLarge && !root.readFailed
 
+        FastScrollHandler {
+            parent: textFlick
+            flickable: textFlick
+        }
+
         Text {
             id: body
             width: parent.width
             text: file.text()
+            // For ui/Ipc.qml: the drawn body, its box and its text, so a test counts pixels where the words are.
+            readonly property Item bodyItem: body
             // MarkdownText resolves inline image references, so a downloaded README would fetch from
             // the network on cursor movement; the canvas asks for the file verbatim in any case.
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             color: Theme.color.foreground
             font.family: Theme.font.family
-            font.pixelSize: Theme.font.bodySmall
+            font.pixelSize: Theme.font.body
         }
     }
 
@@ -57,7 +67,7 @@ Item {
         text: root.status
         color: Theme.color.muted
         font.family: Theme.font.family
-        font.pixelSize: Theme.font.bodySmall
+        font.pixelSize: Theme.font.body
         textFormat: Text.PlainText
     }
 }

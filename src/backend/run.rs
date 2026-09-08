@@ -11,6 +11,7 @@ use crate::backend::opsdispatch::{cancel_transfer, do_mkdir, do_rename, do_undo,
 use crate::backend::opsreq::OpMsg;
 use crate::backend::mime::Db;
 use crate::backend::dirsizereq::{queue_dirsizes, walk_one_dirsize};
+use crate::backend::events::{spawn_forwarder, spawn_op_forwarder, spawn_reader, Event};
 use crate::backend::fsinfo::{fsinfo_line, read as read_fsinfo};
 use crate::backend::fsinfo::dev_of;
 use crate::backend::listpaths;
@@ -27,16 +28,16 @@ use crate::backend::thumbcache::{default_root, Cache};
 use crate::backend::thumbreq::{cancel_row, forget_one, report_done, thumb_rows};
 use crate::backend::thumbs::{Done, Pool};
 use crate::backend::thumbwrite::sweep_own_temps;
+use crate::backend::watch::{changed_line, Watch};
 use crate::backend::thumbspec::Thumbnailers;
-use crate::error::{from_io, FleaError};
+use crate::error::FleaError;
 use crate::heap;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufWriter, Write};
-use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 // Wider pools settle sooner and answer input later, and 4 is the widest that costs neither the first thumbnail nor the scroll; see AGENTS.md "Thumbnail requests".
@@ -44,62 +45,11 @@ const THUMB_WORKERS: usize = 4;
 // The whole shutdown budget: a running job is killed at the pool's own 20 s deadline, so waiting longer than that can never cut one short.
 const DRAIN_LIMIT: Duration = Duration::from_secs(25);
 
-// std has no select, so every source of work reaches the loop as one of these.
-enum Event {
-    Request(String),
-    Thumb(Done),
-    // A write operation's own thread reports here, so the loop stays the only writer of stdout.
-    Op(OpMsg),
-    ReadError(FleaError),
-    Closed,
-}
-
 // The loop stops on Quit; every other request continues it, because errors are responses.
 #[derive(PartialEq)]
 enum Control {
     Continue,
     Quit,
-}
-
-// stdin blocks, so reading it is a thread and the loop only ever waits on the channel.
-fn spawn_reader(tx: Sender<Event>) {
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let event = match line {
-                Ok(l) => Event::Request(l),
-                // The reader has no writer, so the decode failure is handed back for the loop to report.
-                Err(e) => Event::ReadError(from_io("read", "stdin", &e)),
-            };
-            let fatal = matches!(event, Event::ReadError(_));
-            if tx.send(event).is_err() || fatal {
-                return;
-            }
-        }
-        let _ = tx.send(Event::Closed);
-    });
-}
-
-// An operation thread answers on its own channel, joined onto the loop's receiver the same way the pool's is.
-fn spawn_op_forwarder(results: Receiver<OpMsg>, tx: Sender<Event>) {
-    thread::spawn(move || {
-        for msg in results {
-            if tx.send(Event::Op(msg)).is_err() {
-                return;
-            }
-        }
-    });
-}
-
-// The pool answers on its own channel, so one thread joins the two onto the single receiver the loop waits on.
-fn spawn_forwarder(results: Receiver<Done>, tx: Sender<Event>) {
-    thread::spawn(move || {
-        for done in results {
-            if tx.send(Event::Thumb(done)).is_err() {
-                return;
-            }
-        }
-    });
 }
 
 // Errors are responses, so the loop never exits on a bad request.
@@ -142,7 +92,9 @@ pub fn run() -> i32 {
     // The workers hold senders too, so no exit can come from a disconnect and every exit is an explicit event; see AGENTS.md "Thumbnail requests".
     spawn_forwarder(done, tx.clone());
     spawn_op_forwarder(op_rx, tx.clone());
-    spawn_reader(tx);
+    spawn_reader(tx.clone());
+    // Armed before the first request, so no listing is ever answered with nothing watching it.
+    let mut watch = Watch::start(tx);
     loop {
         // Idle (nothing queued and no walk running) this is exactly the old blocking recv, see docs/protocol.md "dirsize".
         let event = if st.dirsize_queue.is_empty() && st.search.is_none() {
@@ -163,11 +115,17 @@ pub fn run() -> i32 {
         };
         match event {
             Event::Request(line) => {
-                if handle_line(&line, &mut out, &mut st, &tb, &pool, &cache, &mut ops) == Control::Quit {
+                if handle_line(&line, &mut out, &mut st, &tb, &pool, &cache, &mut ops, &mut watch) == Control::Quit {
                     break;
                 }
             }
             Event::Thumb(d) => report_done(&mut out, &mut st, d),
+            // The one line no client asked for, and only ever for the directory being listed now.
+            Event::Changed(wd) => {
+                if watch.is_current(wd) {
+                    say(&mut out, &changed_line(&st.base));
+                }
+            }
             Event::Op(m) => report_op(&mut out, &mut ops, m),
             Event::ReadError(e) => {
                 // The framing cannot be trusted past a decode failure, so this reports and stops, as before.
@@ -196,6 +154,7 @@ fn handle_line(
     pool: &Pool,
     cache: &Cache,
     ops: &mut Ops,
+    watch: &mut Watch,
 ) -> Control {
     match parse_request(line) {
         Request::List { path, first, hidden } => {
@@ -203,18 +162,27 @@ fn handle_line(
             if finish_search(out, st, true) {
                 forget_rows(st, pool);
             }
+            // Before the scan, because a change readdir raced is missing from the rows this answers with.
+            watch.begin(Path::new(&path));
             match scan(&path, hidden) {
                 Ok((mut l, read_ms)) => {
                     let sort_ms = sort_by_name(&mut l, false);
                     // base and listing only move together, so a failed list cannot mix them.
                     st.base = PathBuf::from(&path);
                     st.listing = l;
+                    watch.commit();
                     forget_rows(st, pool);
+                    // Said once per listing, because a folder nobody can watch goes stale in silence.
+                    if watch.refused() {
+                        eprintln!("flea: {} will not follow outside changes, inotify refused a watch on it", path);
+                    }
                     writeln!(out, "{}", listed_line(st.listing.len(), read_ms, sort_ms, dev_of(&st.base))).ok();
                     // Rides along unasked: asking costs a 60 ms round trip at first paint.
                     write_window(out, st, 0, first, tb);
                 }
                 Err(e) => {
+                    // The listing did not move, so neither does its watch.
+                    watch.abandon();
                     // A typed path reaches the denial with no parent row to remember the mode from,
                     // so the stat that survives the refused read is the pane's only source for it.
                     writeln!(out, "{}", error_line_with_mode(&e, mode_of(&path))).ok();
@@ -222,8 +190,11 @@ fn handle_line(
             }
             out.flush().ok();
         }
-        Request::ListPaths { paths, first } =>
-            listpaths::answer(out, st, pool, tb, &paths, first),
+        // A set of named paths is not a directory, so the watch stops rather than following its base.
+        Request::ListPaths { paths, first } => {
+            watch.stop();
+            listpaths::answer(out, st, pool, tb, &paths, first)
+        }
         Request::Window { start, count } => {
             write_window(out, st, start, count, tb);
             out.flush().ok();
@@ -234,6 +205,8 @@ fn handle_line(
             }
             st.base = PathBuf::from(&path);
             st.listing = Listing::new();
+            // A walk's matches are not a directory either, so nothing is watched until list asks again.
+            watch.stop();
             forget_rows(st, pool);
             // The client is told at once that its old rows are gone, then the count grows as matches arrive.
             writeln!(out, "{}", listed_line(0, 0.0, 0.0, dev_of(&st.base))).ok();

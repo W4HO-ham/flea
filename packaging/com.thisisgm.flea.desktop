@@ -3,7 +3,7 @@ Type=Application
 Name=Flea
 GenericName=File Manager
 Comment=Fast, keyboard-first file manager
-# The entry always means the window: without --gui the mode would be inferred from whatever stdio the launcher hands over.
+# --gui states the mode rather than choosing it: bare flea opens the window too, so the flag is a contract, not a correction.
 Exec=flea --gui %f
 Icon=com.thisisgm.flea
 Terminal=false

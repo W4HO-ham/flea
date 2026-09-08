@@ -15,6 +15,15 @@ var SECTIONS = [
     { id: "menus", label: "Menus", glyph: "list" }
 ]
 
+// Where a section id sits in SECTIONS, or 0 for an id no section carries.
+function sectionIndex(id) {
+    for (var i = 0; i < SECTIONS.length; i++) {
+        if (SECTIONS[i].id === id)
+            return i
+    }
+    return 0
+}
+
 // The six SettingsMenus.html puts under one master row, and the ids ui/js/Menu.js gives those rows.
 var BASIC = ["cut", "copy", "paste", "duplicate", "rename", "trash"]
 
@@ -40,10 +49,10 @@ var LABELS = {
     sharelink: "Copy share link", open: "Open", toggleHidden: "Show hidden files"
 }
 
-// The two values of the Keys row. SettingsKeys.html draws four; this release ships the toggle the
-// public list named, Mac against Windows, over the one key table rather than a preset system.
-var PRESETS = ["mac", "windows"]
-var PRESET_LABELS = { mac: "Mac", windows: "Windows" }
+// The four values of the Keys row, in SettingsKeys.html's own chooser order. The first is what a
+// missing or unrecognised stored name resolves to, which that board says is Default.
+var PRESETS = ["default", "vim", "mac", "windows"]
+var PRESET_LABELS = { "default": "Default", vim: "Vim", mac: "Mac", windows: "Windows" }
 
 // Every board row carries a left mark, and a switch wears the mark of the row it governs: these are
 // ui/js/Menu.js's own glyphs by action id, which tests/js/settings.js asserts the two agree on.
@@ -180,12 +189,13 @@ function displayRows(state) {
     return out
 }
 
-// The compositor's number as Hyprland writes it, 1.00 and 1.25; an unanswered query says so rather
+// The SettingsScale board's own cell: the word first, then the compositor's number as Hyprland writes
+// it, 1.00 and 1.25; an unanswered query says so rather
 // than reading as 1x, because a wrong number here looks exactly like a right one.
 function scaleLabel(scale) {
     if (!(scale > 0))
         return "not reported"
-    return (Math.round(scale * 100) / 100) + "x"
+    return "Read-only " + (Math.round(scale * 100) / 100) + "x"
 }
 
 // The one row of this section that is not a menu action: it governs how every menu row is drawn
@@ -224,9 +234,10 @@ function keyRows(state) {
     var out = [
         { kind: "group", label: "Preset" },
         { kind: "choice", id: "preset", label: "Keybinding preset", glyph: "keyboard",
+          options: PRESETS.map(function (p) { return PRESET_LABELS[p] }),
           value: PRESET_LABELS[state.preset] || state.preset },
-        { kind: "hint", label: "Mac and Windows, over the one key table. Every other binding is "
-                               + "shared, and the change lands in this window at once." },
+        { kind: "hint", label: "Default, Vim, Mac and Windows, over the one key table. Every other "
+                               + "binding is shared, and the change lands in this window at once." },
         { kind: "group", label: "This preset" }
     ]
     var table = state.presetKeys || []

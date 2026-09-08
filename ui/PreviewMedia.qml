@@ -124,7 +124,7 @@ Item {
                 text: root.path.substring(root.path.lastIndexOf("/") + 1)
                 color: Theme.color.foreground
                 font.family: Theme.font.family
-                font.pixelSize: Theme.font.bodySmall
+                font.pixelSize: Theme.font.body
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
             }

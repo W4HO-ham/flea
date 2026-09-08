@@ -1,5 +1,6 @@
 // Where ui.json lives and the one way it is rewritten: the lock, the re-read, the temp and the rename.
 use crate::jsondoc::{self, Json};
+use crate::oflags::O_NOFOLLOW;
 use crate::uischema;
 use crate::uistate;
 use crate::userfile;
@@ -16,8 +17,6 @@ const LEGACY: &str = "view.json";
 // The state file is one user's, so it is created owner-only in the open() call and never chmod'd after.
 const OWNER_ONLY_FILE: u32 = 0o600;
 const OWNER_ONLY_DIR: u32 = 0o700;
-// open(2) O_NOFOLLOW on Linux: a planted symlink at the lock is an error rather than a redirect.
-const O_NOFOLLOW: i32 = 0o400000;
 
 // The one shared update path both front ends go through, and the paths it works on.
 pub struct Store {

@@ -82,6 +82,9 @@ function run(check) {
     check("a row with no action at all is blank", Keymap.hintFor(undefined), "")
     check("every hint names a key something is really bound to",
           Object.keys(Keymap.HINTS).filter(function (a) { return Keymap.HINTS[a].length === 0 }).length, 0)
+    // The seven Finder chords the Mac preset overlays, so the preset is named here rather than
+    // assumed: the map opens on Default, whose own three rows are the view chords alone.
+    Keymap.setPreset("mac")
     check("ctrl k connects to a server", Keymap.lookup(Qt.Key_K, "\u000b", ctrl), "addNetwork")
     check("ctrl delete trashes", Keymap.lookup(Qt.Key_Delete, "", ctrl), "trash")
     check("ctrl up goes to the parent", Keymap.lookup(Qt.Key_Up, "", ctrl), "parent")
@@ -90,6 +93,7 @@ function run(check) {
           [Keymap.lookup(Qt.Key_1, "1", ctrl), Keymap.lookup(Qt.Key_2, "2", ctrl),
            Keymap.lookup(Qt.Key_3, "3", ctrl)].join("|"),
           "viewList|viewColumns|viewGrid")
+    Keymap.setPreset("default")
     // The one Finder chord not taken: Ctrl+D already pages, with Ctrl+U as its pair.
     check("ctrl d still pages, so Finder's duplicate chord is not taken", Keymap.lookup(Qt.Key_D, "d", ctrl), "pageDown")
     check("ctrl shift n makes a folder", Keymap.lookup(Qt.Key_N, "N", ctrl | shift), "newFolder")
@@ -165,6 +169,7 @@ function run(check) {
 // a Mac-only chord would be wrong for half its readers the moment the Keys toggle moved. Asked as
 // "does the whole sheet resolve to the same actions under both presets", which is the invariant.
 function runSheetStability(check) {
+    var opened = Keymap.preset
     Keymap.setPreset("mac")
     var keysUnderMac = Keymap.SHEET.map(sheetAction).join("|")
     var chordsUnderMac = Keymap.SHEET.map(chordActions).join("|")
@@ -173,16 +178,33 @@ function runSheetStability(check) {
           Keymap.SHEET.map(sheetAction).join("|"), keysUnderMac)
     check("and no chord it draws does either",
           Keymap.SHEET.map(chordActions).join("|"), chordsUnderMac)
-    Keymap.setPreset("mac")
+    Keymap.setPreset(opened)
 }
 
-// The Mac/Windows toggle. lookup() consults the overlay first, so the same call answers differently
-// with the preset moved, and the default is mac because the shared tables were written as Finder's.
+// SettingsKeys.html's four-value chooser. lookup() consults the overlay first, so the same call
+// answers differently with the preset moved; every preset carries the three view chords, GM's ruling
+// of 2026-09-06 over that board's dash, and every other row it governs is a bare shared key.
 function runPreset(check) {
     var ctrl = Qt.ControlModifier
     var shift = Qt.ShiftModifier
-    check("the default preset is mac", Keymap.preset, "mac")
-    check("so Finder's Cmd+1 read as Ctrl+1 picks the list view",
+    check("the preset this build opens on is Default", Keymap.preset, "default")
+    check("Default picks the list view on Ctrl+1, and Finder's other chords stay unbound under it",
+          [Keymap.lookup(Qt.Key_1, "1", ctrl), Keymap.lookup(Qt.Key_H, "\u0008", ctrl),
+           Keymap.lookup(Qt.Key_Up, "", ctrl), Keymap.lookup(Qt.Key_K, "\u000b", ctrl)].join("|"),
+          "viewList|||")
+    check("and the shared map is the rest of it, bare keys and chords alike",
+          [Keymap.lookup(Qt.Key_J, "j", Qt.NoModifier), Keymap.lookup(Qt.Key_H, "h", Qt.NoModifier),
+           Keymap.lookup(Qt.Key_C, "\u0003", ctrl)].join("|"), "cursorDown|parent|copy")
+
+    // Every vim key is shared and preset-independent, so Vim differs from Default in nothing at all.
+    Keymap.setPreset("vim")
+    check("Vim answers exactly as Default does, chord and bare key alike",
+          [Keymap.lookup(Qt.Key_1, "1", ctrl), Keymap.lookup(Qt.Key_H, "\u0008", ctrl),
+           Keymap.lookup(Qt.Key_J, "j", Qt.NoModifier), Keymap.lookup(Qt.Key_G, "G", Qt.NoModifier)]
+              .join("|"), "viewList||cursorDown|cursorLast")
+
+    Keymap.setPreset("mac")
+    check("Finder's Cmd+1 read as Ctrl+1 picks the list view under Mac",
           Keymap.lookup(Qt.Key_1, "1", ctrl), "viewList")
     check("and Explorer's Ctrl+H is not bound under it",
           Keymap.lookup(Qt.Key_H, "\u0008", ctrl), "")
@@ -201,10 +223,32 @@ function runPreset(check) {
           [Keymap.lookup(Qt.Key_C, "\u0003", ctrl), Keymap.lookup(Qt.Key_F2, "", Qt.NoModifier),
            Keymap.lookup(Qt.Key_Backspace, "", Qt.NoModifier)].join("|"), "copy|rename|parent")
 
+    // The three views are bound in no shared table, so a preset overlaying nothing left the keyboard
+    // with no route to them at all. GM's ruling: asked of all four now, not only Mac and Windows.
+    var views = function (mods) {
+        return [Keymap.lookup(Qt.Key_1, "1", mods), Keymap.lookup(Qt.Key_2, "2", mods),
+                Keymap.lookup(Qt.Key_3, "3", mods)].join("|")
+    }
+    var spelling = [["default", ctrl], ["vim", ctrl], ["mac", ctrl], ["windows", ctrl | shift]]
+    var reached = []
+    for (var p = 0; p < spelling.length; p++) {
+        Keymap.setPreset(spelling[p][0])
+        reached.push(spelling[p][0] + " " + views(spelling[p][1]))
+    }
+    check("every preset reaches all three views from the keyboard, each in its own spelling",
+          reached.join(", "),
+          "default viewList|viewColumns|viewGrid, vim viewList|viewColumns|viewGrid, "
+          + "mac viewList|viewColumns|viewGrid, windows viewList|viewColumns|viewGrid")
+    check("and all four were asked, so that check has a denominator", spelling.length, 4)
+
+    // ui/ViewState.qml resolves a stored name that is not one of the four to default before it ever
+    // reaches here, so an unknown name matching no overlay row is the validator's business, not this
+    // module's: the shared tables still answer under it, and the overlay stays silent.
     Keymap.setPreset("marzipan")
-    check("a preset name this build does not have falls back to mac rather than an empty map",
-          Keymap.preset + " " + Keymap.lookup(Qt.Key_1, "1", ctrl), "mac viewList")
-    Keymap.setPreset("mac")
+    check("a preset name this build does not have reaches no overlay row, and no shared key with it",
+          [Keymap.lookup(Qt.Key_1, "1", ctrl), Keymap.lookup(Qt.Key_H, "\u0008", ctrl),
+           Keymap.lookup(Qt.Key_Backspace, "", Qt.NoModifier)].join("|"), "||parent")
+    Keymap.setPreset("default")
 }
 
 // The three caps that name a key rather than printing one; everything else on the sheet is the

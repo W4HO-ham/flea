@@ -1,6 +1,6 @@
 // flea --picker: the per-user step that routes the desktop's file chooser here, see docs/install.md.
 use crate::hyprkeys;
-use crate::userfile::{config_home, create_file, env_dir, home, replace_file};
+use crate::userfile::{config_home, create_file, data_file, replace_file};
 use std::fs;
 use std::path::PathBuf;
 
@@ -123,25 +123,11 @@ fn shadowing_file() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-// The lookup xdg-desktop-portal 1.22 makes for a backend: the data home first, then every data dir,
-// then its own datadir. Verified against src/xdp-portal-config.c load_installed_portals() at tag 1.22.1.
+// Proof the package landed, the same search defaults::installed_entry() makes for its own file.
+// corner: xdg-desktop-portal 1.22.1 reads its own datadir too, so a session narrowing XDG_DATA_DIRS
+// off /usr/share is refused here rather than claimed behind a --default that refused the same box.
 fn installed_portal() -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    match env_dir("XDG_DATA_HOME") {
-        Some(p) => dirs.push(p),
-        None => {
-            if let Ok(h) = home() {
-                dirs.push(h.join(".local/share"));
-            }
-        }
-    }
-    let system = std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty());
-    let system = system.unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    dirs.extend(system.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
-    dirs.push(PathBuf::from("/usr/share"));
-    dirs.into_iter()
-        .map(|d| d.join("xdg-desktop-portal").join("portals").join(PORTAL_FILE))
-        .find(|p| p.is_file())
+    data_file(&format!("xdg-desktop-portal/portals/{}", PORTAL_FILE))
 }
 
 // portals.conf(5) is a key file, of which only one key in one group is Flea's:

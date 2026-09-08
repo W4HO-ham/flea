@@ -58,7 +58,7 @@ Item {
     TextMetrics {
         id: metrics
         font.family: Theme.font.family
-        font.pixelSize: Theme.font.bodySmall
+        font.pixelSize: Theme.font.body
         text: "0"
     }
 
@@ -254,6 +254,11 @@ Item {
         contentWidth: width
         contentHeight: rail.height + 2 * Style.spacing.rowPaddingX
         boundsBehavior: Flickable.StopAtBounds
+
+        FastScrollHandler {
+            parent: scroller
+            flickable: scroller
+        }
 
         Column {
             id: rail

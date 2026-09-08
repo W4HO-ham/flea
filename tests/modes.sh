@@ -47,8 +47,31 @@ want=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 out=$($BIN --version 2>&1 </dev/null); rc=$?
 check "--version exits 0" "0" "$rc"
 check "--version prints the crate version" "$want" "$out"
-out=$($BIN --version --gui 2>&1 </dev/null)
-check "--version wins over another mode" "$want" "$out"
+# Trailing arguments are a usage error, the shape --default and --picker already take: a mode that
+# ignored them would answer for a command line nobody wrote. It is still read before every other
+# mode, so the refusal is what a second flag gets rather than that flag's own behaviour.
+out=$($BIN --version --gui 2>&1 >/dev/null </dev/null); rc=$?
+check "--version with a trailing flag is a usage error" "2" "$rc"
+check "--version with a trailing flag says it takes nothing" "1" "$(echo "$out" | grep -c 'version takes nothing')"
+out=$(env -u WAYLAND_DISPLAY -u DISPLAY $BIN --gui --version 2>&1 >/dev/null </dev/null); rc=$?
+check "--version after another flag is refused too" "2" "$rc"
+check "--version is still read before the other modes" "1" "$(echo "$out" | grep -c 'version takes nothing')"
+
+# --pick refuses before any window and writes no reply, and an exported-but-empty request is absent
+# the way an empty display is: a wrapper's unset variable must not open a chooser with no request.
+D="$FIXTURE_ROOT/flea-pick-test-$$"
+sandbox_make "$D"
+out=$(env -u FLEA_PICKER $BIN --pick "$D/reply.json" 2>&1 </dev/null); rc=$?
+check "--pick with no request refuses" "2" "$rc"
+check "--pick with no request names FLEA_PICKER" "1" "$(echo "$out" | grep -c 'needs FLEA_PICKER')"
+out=$(env FLEA_PICKER= $BIN --pick "$D/reply.json" 2>&1 </dev/null); rc=$?
+check "--pick with an empty request refuses" "2" "$rc"
+check "--pick with an empty request gives the same sentence" "1" "$(echo "$out" | grep -c 'needs FLEA_PICKER')"
+# The request guard is read before the display one, so a headless run cannot pass this case by
+# refusing for the other reason: with a display, that is the branch that would open a window.
+check "--pick with an empty request refuses on the request, not the display" "0" "$(echo "$out" | grep -c 'no graphical session')"
+check "a refused pick wrote no reply file" "0" "$(ls -A "$D" | grep -c '^reply.json$')"
+sandbox_remove "$D"
 
 # No tty on either handle and no display: it must refuse, not guess.
 out=$(env -u WAYLAND_DISPLAY -u DISPLAY $BIN --gui 2>&1 </dev/null)

@@ -131,6 +131,85 @@ bytes. A key that is none of the three, `kind` and `mode` included, reaches neit
 phase: `sort.rs`'s `parse_sort_by()` refuses it with the one sentence that names the
 three it accepts.
 
+## The open directory is watched
+
+Issue 68: a folder open in Flea did not follow a create, rename or delete made by another program.
+`list` ran once when the pane arrived, and after that only Flea's own writes re-read the directory,
+so a window kept open beside a terminal drew whatever was true when it was opened.
+
+**The backend watches, the client re-reads.** `backend/watch.rs` holds one non-recursive inotify
+watch on the directory being listed, armed by `list` BEFORE the scan and dropped by `search` and
+`listpaths`, whose listings are not directories. Arming after the scan lost every change the scan
+itself raced, a hole the width of one readdir: reproduced on the 100,000 file fixture, where a
+create during the scan answered no `changed` line at all and the same create a second later
+answered one. The new watch is armed BESIDE the current one rather than in place of it, so a scan
+that fails costs the directory still on screen nothing: `commit` drops the old watch only once the
+new listing replaced it, and `abandon` drops the new one when the scan failed. Replacing it up front
+was the first fix and it was wrong, because a failed list then handed the open directory a new
+descriptor and `is_current` dropped anything still carrying the old one.
+Its reader thread sends the loop an `Event::Changed(wd)`, and the loop answers
+`{"t":"changed","path":"<the directory>"}` and changes nothing else: the rows, the count and
+the sort order stay exactly what they were, because the client is the only thing that knows whether
+it still wants them. See `docs/protocol.md` "changed" for the mask and the coalescing.
+
+**The descriptor is why the payload is read at all.** `inotify_rm_watch` delivers an `IN_IGNORED` for
+the watch it removed, so a reader that treated every wakeup as "something changed" answered one
+`changed` line for every navigation, for the directory the pane had just arrived in. The reader walks
+the burst for its watch descriptors and nothing else, and `Watch::is_current` drops any that is not
+the one being listed now. `tests/protocol.sh`'s "a change in the directory just left answers nothing"
+is that case.
+
+**One burst is one re-read, and it is not restarted.** `ui/PaneWire.qml` starts a 400 ms timer on the
+first `changed` after idle and lets later ones land inside it rather than restarting it: a restart
+would mean a directory under continuous writing never settled and so never refreshed at all. Worst
+case is one full re-scan per 400 ms while something is actively rewriting the folder the user is
+looking at, which is 25 to 38 ms of that on the 100,000 file fixture.
+**The test for this has to sample while the writing is still going**, which is what makes it a
+test: measured after the writer stops, a restarted timer and an absorbing one both show a re-read
+and the check passes either way. `tests/ui.sh watch` samples once inside a background writer's run
+and requires the count to have moved; under `restart()` it does not move at all. No number is
+quoted here on purpose, because each `omarchy-drive ipc` round trip costs 190 to 565 ms and the
+sample therefore lands later than the sleep in front of it says.
+
+**A re-read is a fresh `list`, so it renumbers every row, and that is what the anchor is for.**
+`ui/js/Nav.js`'s `refreshWatched` records the NAME under the cursor before the re-read and
+`applyAnchor` puts the cursor back on that name when the rows return, because a file created above
+the cursor shifts every index below it and restoring by index alone would move the user onto another
+file. The listing answers from row 0, so a cursor deep in a large directory also asks for its own
+window back and the anchor stands until that window arrives. The wait is on the window and not on a
+number of replies, because `applyAnchor` runs on every rows delivery and a counter was spent by the
+first screenful arriving twice; it ends when the listing has shrunk to that offset or below, the one
+case where the backend clamps the window to row 0 and the reply being waited for is never coming.
+A name that is gone from both falls back to the clamped old index, which keeps the view where the
+user left it. The filter query is put
+back too: it narrows the rows the pane holds rather than choosing which directory it holds.
+
+**The selection is not re-anchored; the re-read waits for it instead.** `ui/js/Selection.js` is a set
+of row indices and its own rule is that a new listing clears them, because an index into a directory
+that has changed names another file. Re-pointing a selection at other files is how a delete hits the
+wrong ones, so `PaneWire`'s `watchBusy` defers the re-read while a selection stands, and with it
+while a rename editor is open, the context menu is up, a filter is being typed, a search listing is
+showing or a list is already in flight. The debt is kept, not dropped: `onWatchBusyChanged` pays it
+the moment the last of those clears. A user holding a selection therefore sees the same stale
+listing 0.1.4 always showed, for as long as they hold it. **The debt does not travel**: leaving the
+directory clears it, because the pane's own `onPathChanged` fires before the navigation clears the
+selection that was holding it, and without that a change in the folder being left was paid for by a
+full re-list of the folder being opened. `ui/Backend.qml`'s `listRequests` counter is what makes
+that assertable, the same idiom as `thumbRequests` and `dirSizeRequests`: `tests/ui.sh watch` counts
+from before the navigation and requires exactly one listing for it.
+
+**// corner: this is the local kernel's view of one directory.** A change another machine makes to an
+NFS or SMB share raises no inotify event here, so a network mount is exactly as live as it was
+before. So is a box whose inotify instance limit is exhausted, which says so once on stderr and then
+never sends the line. `IN_MODIFY` is deliberately not in the mask: it fires on every `write(2)` and a
+listing does not draw a partial size, so a row's size follows `IN_CLOSE_WRITE` instead.
+
+**Flea's own writes pay for one extra scan.** A rename, mkdir, trash or transfer already calls
+`pane.refresh()`, and the watch answers for the same write about 400 ms later, so the directory is
+read twice. The second read is anchored the same way and moves nothing the user can see. Suppressing
+it would mean deciding that a `changed` arriving during a listing belongs to that listing, which is
+exactly the guess that would drop a real outside change, so it is paid rather than guessed at.
+
 ## Why the listing is an arena
 
 `Listing` (`listing.rs`) holds one `String` with every entry's name written back to
@@ -578,9 +657,10 @@ and exits 2; `flea --open` with no path and `flea --open a b` are both that case
 predates this branch for `--prewarm` and this branch extended it to `--open` and `--terminal`. `--open` takes exactly one path and exits with the whole of its contract: `0` is a
 successful handoff, `2` is anything that could not be opened and carries one elided
 sentence, and `3` means the resolved target is a directory and carries no output at all. A
-directory is refused rather than handed on because `xdg-mime query default inode/directory`
-here is `org.gnome.Nautilus.desktop`, so handing one to the desktop's opener from inside a file
-manager opens a different file manager; the caller navigates instead. See "Opening a file".
+directory is refused rather than handed on because the desktop default for `inode/directory` is a
+file manager either way, `org.gnome.Nautilus.desktop` on an unclaimed box and
+`com.thisisgm.flea.desktop` once `--default` has claimed it, so handing one on opens a file manager
+from inside a file manager; the caller navigates instead. See "Opening a file".
 
 `--terminal` takes exactly one directory and has a two-value contract: `0` is a successful handoff
 to `xdg-terminal-exec`, and `2` is everything else, carrying one elided sentence on stderr. A path
@@ -605,24 +685,43 @@ writes nothing when Flea's own desktop entry, `com.thisisgm.flea.desktop` (`defa
 is not installed under `$XDG_DATA_HOME` (or `~/.local/share`) or any of `$XDG_DATA_DIRS` (default
 `/usr/local/share:/usr/share`): the packaged entry is the proof the pacman package landed, and
 pointing `xdg-mime` or Hyprland's bindings at an uninstalled binary would be a claim on nothing.
-Past that check `defaults::claim()` rewrites two independent per-user files through
-`userfile::replace_file` (see
-"Predictable path writes"): the `inode/directory` MIME default via `xdg-mime`, and the
-additive, markered block `hyprkeys::claim()` adds to Omarchy's `~/.config/hypr/bindings.lua` for
-the two file-manager chords.
+Past that check `defaults::claim()` runs three independent halves, each one line of output through
+`defaults::report()`, which takes exactly those three and prints every one whatever the others did:
+the `inode/directory` MIME default via `xdg-mime`, the user-level D-Bus registration described in
+"Show in folder", and the additive, markered block `hyprkeys::claim()` adds to Omarchy's
+`~/.config/hypr/bindings.lua` for the two file-manager chords. The first and third rewrite existing
+per-user files through `userfile::replace_file` (see "Predictable path writes"); the second creates
+its own file with `userfile::create_file`, so a symlink planted at that path is refused rather than
+followed.
 
-**The chooser step is the conditional one and the other two are not.** Past the handler half,
+**The registration half refuses rather than skipping.** `claim_service()` reads its `Exec` out of
+the packaged `com.thisisgm.flea.FileManager1.service` found on the same XDG ladder
+`installed_entry()` reads, and with none installed it returns an `Err` naming what is missing rather
+than writing a path of its own. That `Err` makes `defaults::claim()` non-zero, so `claim_both()`
+stops before the chooser step. The box that reaches it is the same one the chooser step skips: a
+`cargo build` binary run against a package that predates 0.1.4.
+
+**The chooser step is the one that skips rather than fails, and no other step does.** Past the handler half,
 `claim_both()` asks `chooser::backend_installed()`, and with no `flea.portal` in any portal
 directory it says `no portal backend is installed, so the file chooser step was skipped` on stderr
 and counts that as no failure: that is what a source build gets, because only the pacman package
 installs that file. With one installed it runs `chooser::claim()` too, which writes
 `~/.config/xdg-desktop-portal/portals.conf` and a second markered block in the same
-`~/.config/hypr/bindings.lua`. So a full `--default` touches three files, not two:
-`~/.config/mimeapps.list`, `~/.config/hypr/bindings.lua` and
-`~/.config/xdg-desktop-portal/portals.conf`. **A refused handler claim stops the command there**, so
+`~/.config/hypr/bindings.lua`. So a full `--default` touches four files, not two:
+`~/.config/mimeapps.list`, `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service`,
+`~/.config/hypr/bindings.lua` and `~/.config/xdg-desktop-portal/portals.conf`.
+**A refused handler claim stops the command there**, so
 the chooser half never writes behind a step that wrote nothing. `release_both()` is
-unconditional and reverses every step, each half a no-op when it was never claimed; no half's
-failure blocks another, see `defaults::report` and `chooser::report`. The `undo both with:` line
+unconditional and runs every step back, each half a no-op when it was never claimed; no half's
+failure blocks another, see `defaults::report` and `chooser::report`. **Running a step back is not
+always restoring it.** The key block and the picker's window rule are marked blocks, the chooser
+routing is one key, and the registration is a whole file of Flea's own, so cutting them leaves what
+was there before; the handler half is
+`release_mime()`, which only calls `drop_default()` to delete Flea's line and then reports what
+`xdg-mime query default` answers next. Nothing persists the `was <id>` that `claim_mime()` printed,
+so a handler the operator had pinned is never written back, and on a box that had one
+`flea --default off` leaves a `[Default Applications]` section that no longer names it.
+The `undo both with:` line
 belongs to the invocation and not to a step, so `main.rs` prints it once, after the steps it ran,
 and `--default off` prints none at all.
 
@@ -647,7 +746,9 @@ exactly once, and a type nobody matches on twice would be ceremony.
 `--tui` and `--gui` are mutually exclusive; giving both is a usage error naming the conflict,
 never a coin flip. With neither flag the window is the default, including when both handles are
 a terminal, because the terminal interface is reserved but not built and a bare invocation must
-open the product that exists. `--tui` is the only route to that reserved interface. It requires
+open the product that exists. `--tui` is the only route to that reserved interface, and the only
+mode that reads the tty at all: `main.rs` computes the `is_terminal()` pair one line above the
+`if want_tui` that is its only reader, so no other mode can consult it even by accident. It requires
 both stdin and stdout to be a real terminal, not just one, so a future implementation cannot write
 escape codes into a pipeline. `flea | head` gives stdin a tty and stdout a pipe and an explicit
 `--tui` therefore refuses. A window launch without a non-empty `WAYLAND_DISPLAY` or `DISPLAY`
@@ -757,15 +858,112 @@ travels in a JSON file inside a `mkdtemp` the backend owns and removes. `ui/pick
 with `FileView` and only kills its own process on `saved()`: the backend reads the file after the
 child exits, and a write still in flight would be a lost answer read as a fault.
 
+## Show in folder
+
+`org.freedesktop.FileManager1` is the interface a desktop's "Show in folder" goes through, and issue
+54 is what happens with nothing of Flea's owning it: Chromium reveals a download and Nautilus opens.
+Measured with `strings` against Chromium 151.0.7922.173 on this box, the binary carries exactly
+`org.freedesktop.FileManager1`, `/org/freedesktop/FileManager1` and `ShowItems`, so that one call is
+the whole of what has to be answered for the reported symptom.
+
+`tools/flea-filemanager1` answers it, and it is the third non-Rust helper in this tree for the same
+reason as the second: a D-Bus service has to own a name, export an object and answer method calls,
+and this crate has no dependencies at all. It copies `tools/flea-portal`'s shape, its `FLEA_BIN`
+seam, its `say()` elision and its release-then-quit idle exit.
+
+**Every window it opens is `flea --select` or `flea <dir>`**, which is why the service is small.
+`--select` already resolves a `file://` URI to its parent and puts the cursor on the entry, so
+`ShowItems` is that flag and nothing more; `ShowFolders` wants the folder itself open, which is the
+positional argument. Two items in one directory are one window, because a window can only put the
+cursor on one row, and the first URI named under a directory is the one its window selects.
+
+**`ShowItemProperties` answers `org.freedesktop.DBus.Error.NotSupported`.** Flea has no properties
+dialog. Falling back to `ShowItems` would answer a different question than the caller asked and
+would look, to the caller, exactly like success; a reply that did nothing at all would be worse.
+The signature returns no values, so the error reply is the only channel a refusal has.
+
+**The URIs come from another application, so the boundary is the whole of the rest of the file.**
+The decoder is `GLib.filename_from_uri`, glib's own, rather than a second one: measured here with
+PyGObject 3.56.3 on Python 3.14.7 it refuses a foreign scheme, a bare path, `file:`, `file://` and
+a `%00`, and it hands back the authority separately. The two rules it does not carry are the two the
+service adds: an authority that is neither empty nor `localhost` is refused, and a decoded path
+holding a control character is refused, because `%0A` decodes to a newline without complaint. A path
+that is not there and a target with no parent are refused too. Each refusal is per URI and elided to
+one sentence on stderr, so one bad URI beside a good one does not take the call down; a call left
+with nothing to open answers `org.freedesktop.DBus.Error.InvalidArgs`.
+
+**The shape was verified with a real round trip, not assumed.** `tools/flea-portal` had shipped an
+`isinstance(value, bytes)` test where PyGObject 3.56.3 delivers a list of ints for a D-Bus `ay`. A
+`GLib.Variant("(ass)", ...)` unpacked on this box gives a `list` of `str`, so `isinstance(uri, str)`
+is the right test here, and it is there because the check costs nothing and the last guess was wrong.
+
+**Registration is `packaging/com.thisisgm.flea.FileManager1.service`, named for Flea and not for the
+interface.** Nautilus owns `/usr/share/dbus-1/services/org.freedesktop.FileManager1.service` on this
+box, so a file of that name is a pacman conflict; dolphin, thunar and nemo each ship their own
+vendor-named file carrying `Name=org.freedesktop.FileManager1`, which makes a vendor name the
+measured convention rather than a workaround. The user-level file `flea --default` writes takes the
+plain interface name instead, because no package installs into `$XDG_DATA_HOME` and there is nothing
+there to collide with; D-Bus keys on `Name=` either way.
+
+**Installing does not decide which one answers, and `flea --default` is what does.**
+D-Bus keeps the FIRST registration it reads, and inside one directory the two buses disagree about
+which that is. Measured on 2026-09-06 with all five files in one directory, every `Exec` rewritten
+to a marker: dbus-daemon 1.16.2 ran nautilus's, which is first in `ls -U` and third alphabetically;
+dbus-broker 37 kept `com.thisisgm.flea.FileManager1.service`, which is last in `ls -U` and first
+alphabetically, and logged the other four as duplicates. So dbus-daemon takes readdir order and
+dbus-broker sorts, neither is newest-wins, and an installer can steer neither. Omarchy ships
+nautilus in `omarchy-base.packages`, so a stock box always has a second claimant; on this box on
+2026-09-06, four installed and no Flea package, dbus-broker threw away nautilus's, dolphin's and
+thunar's, so nemo's is the one answering.
+
+The directory order is what settles it, and it is not readdir's. `$XDG_DATA_HOME/dbus-1/services` is
+read before every `$XDG_DATA_DIRS` entry, so one file there outranks all four: that is the same
+shadowing that shipped a development portal backend to the operator as a bug this morning, used on
+purpose. `defaults::claim_service()` writes it, `defaults::release_service()` removes it and the two
+directories it created when nothing else is in them, and both are per-user preferences pacman cannot
+own, which is why they are steps of `flea --default` and not PKGBUILD lines. Measured on this box
+with dbus-broker 37 and a sandbox XDG ladder: with the user file present the broker logged
+`Ignoring duplicate name 'org.freedesktop.FileManager1' in service file '<path>'` for all five
+system files and none for the user one.
+
+**The file leads with a comment saying who wrote it.** dbus-broker 37 and dbus-daemon 1.16.2 both
+accept a `#` comment in a `.service` file, before the group header and after it, measured on this
+box; the untraceable user-level service file was this morning's production bug, so the first line
+is the provenance and it is also how `release_service()` tells Flea's file from somebody else's. A
+file at that path whose first line is not the marker is left alone and named, never overwritten.
+The `Exec` is copied out of the installed packaged registration, so the two can never disagree and
+no install path is written down twice.
+
+**`tests/filemanager1.sh` drives the real interface on a private session bus** it starts inside its
+own fixture, with service directories of its own and `FLEA_BIN` pointing at a stub that records its
+argv. That makes D-Bus activation itself part of the test rather than a manual step, and the first
+case is the negative control: on a bus with an empty service directory the same call fails
+`ServiceUnknown`. The registration under test is the shipped file with only its `Exec` repointed at
+the checkout, so a broken `Name=` in `packaging/` reddens the suite.
+
+**Its last five cases are `flea --default`'s claim on the name.** They run the real binary against a
+sandbox `HOME` and a sandbox XDG ladder, with `xdg-mime` and `hyprctl` stubbed on `PATH`, because a
+reachable `hyprctl` would reload the operator's live Hyprland config rather than anything in the
+fixture. The last of them is the ordering one, and it is a driven negative control rather than an
+assertion: the bus is given the sandbox data home and then a directory of four rival registrations,
+the rival first in `ls -U` answers, `flea --default` makes Flea answer over it, and
+`flea --default off` hands it back. The suite is already in `tests/run-all.sh`'s `headless` list, so
+this coverage needed no new entry there.
+
 ## Module map
 
-- `main.rs` dispatches on argv: `--backend` runs the command loop, `--prewarm <path>
-  <first> <dest>` writes the prewarm file, `--open <path>` hands one file to the desktop's
-  handler, `--terminal <dir>` opens the configured terminal there, `--default [off]` claims or
-  releases the OS-level default and the chooser routing together, `--picker [off]` claims or
-  releases the desktop's file chooser alone, `--pick <reply>` opens one chooser window for
-  `tools/flea-portal`, and anything else
-  opens the window unless explicit `--tui` requests the terminal interface, see "Modes".
+- `main.rs` dispatches on argv, and this is every flag it matches: `--backend` runs the command
+  loop, `--prewarm <path> <first> <dest>` writes the prewarm file, `--open <path>` hands one file
+  to the desktop's handler, `--terminal <dir>` opens the configured terminal there,
+  `--default [off]` claims or releases the OS-level default, the "Show in folder" registration and
+  the chooser routing together,
+  `--youleftmeforstrata` is the undocumented second spelling of `--default off`, `--picker [off]`
+  claims or releases the desktop's file chooser alone, `--pick <reply>` opens one chooser window
+  for `tools/flea-portal`, `--ui-state [<patch>]` reads or merges the shared view state,
+  `--version` prints the version, `--print-target` resolves `--select`'s pair for the tests, and
+  anything else opens the window, on `--select`'s parent directory when one is given, unless
+  explicit `--tui` requests the terminal interface, `--gui` being the explicit spelling of the
+  window a bare invocation already means, see "Modes".
 - `paths.rs` resolves the UI directory and whether a display is available.
 - `gui.rs` execs `qs` against the resolved UI directory.
 - `thp.rs` the one `prctl(PR_SET_THP_DISABLE)` declaration, `disable()` and `enable()`.
@@ -775,8 +973,9 @@ child exits, and a write still in flight would be a lost answer read as a fault.
   the `inode/directory` MIME default via `xdg-mime`, and reporting each half, see "Modes".
 - `hyprkeys.rs` adds or removes the additive, markered block in Omarchy's
   `~/.config/hypr/bindings.lua` that binds the two file-manager chords to Flea, see "Modes".
-- `userfile.rs` resolves `$HOME` and `$XDG_CONFIG_HOME` and rewrites a per-user file through
-  an exclusive temp plus rename, see "Predictable path writes".
+- `userfile.rs` resolves `$HOME`, `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`, walks the XDG data
+  ladder for an installed file, and rewrites a per-user file through an exclusive temp plus
+  rename, see "Predictable path writes".
 - `error.rs` the one error type, naming the failing operation and input.
 - `json.rs` the wire's JSON: read one named field out of one line, escape one string into one.
 - `jsondoc.rs` one whole JSON document in and out, which the one-line scanner above deliberately is not.
@@ -815,6 +1014,11 @@ child exits, and a write still in flight would be a lost answer read as a fault.
 - `backend/run.rs` the command loop, see "Thumbnail requests". stdin is read on its own
   thread and the pool answers on its own channel, and a forwarder thread joins the two, so
   client requests and worker results arrive on one `recv`, because `std` has no `select`.
+- `backend/events.rs` the `Event` those sources arrive as, and the three threads that join them
+  onto the loop's one channel. It came out of `run.rs` at 398 of the 400 hard cap, and it is one
+  job: how work reaches the loop, as against what the loop does with it.
+- `backend/watch.rs` the one inotify watch on the directory the current listing came from, its
+  reader thread and the `changed` line it answers with, see "The open directory is watched".
 - `heap.rs` pins glibc's mmap threshold for the backend, see "The listing arena returns to the OS".
 - `launcher/mod.rs` re-exports `prewarm`, nothing else.
 - `launcher/prewarm.rs` writes the listing and first screenful before the UI starts.
@@ -835,7 +1039,9 @@ child exits, and a write still in flight would be a lost answer read as a fault.
   settle timer and the row-to-thumbnail map, see "Thumbnail requests in the GUI".
 - `ui/PaneWire.qml` is where every reply from outside the window lands: the backend's, and
   those of the three foreign programs the pane runs (`ui/Opener.qml`, `ui/ShareLink.qml`,
-  `ui/Taildrop.qml`); it owns no state and writes only through the pane handed in.
+  `ui/Taildrop.qml`); it writes through the pane handed in and owns only the state a reply needs
+  before the pane has a row for it: the folder a `made` line will open an editor on, and the
+  watched re-read's debt, timer and cursor anchor, see "The open directory is watched".
 - `ui/Header.qml` renders the column header band and its rule, and owns nothing else: it
   was lifted out of `Pane.qml` at the 400-line hard cap and has no behaviour.
 - `ui/Row.qml` renders one row delegate: the icon slot, which a thumbnail replaces in
@@ -1061,7 +1267,10 @@ single line. `ui/NetworkMounts.qml` was a
 third until its own reconciliation extracted `authFailure` to `ui/js/Errors.js` and brought it to
 398, so it is not listed. They
 are listed in `tools/flea-file-budget` as known exceptions so the tool still fails on anything
-else, and each prints its own line rather than being hidden. Every count below is
+else, and each prints its own line rather than being hidden. The view fixes of 2026-09-07 took
+`ui/NetworkDialog.qml`, `ui/Ipc.qml`, `ui/Pane.qml` and `ui/PreviewColumn.qml`, all already at the
+cap, 2 to 6 lines over each (overlay sinks, the column player in its frame, per-view IPC readers,
+the columns thumbnail relay); they are listed the same way, as 0.1.6 exceptions. Every count below is
 `wc -l` on the file, and every test-module count runs from its `#[cfg(test)]` line to
 the end of the file; run the tool rather than trusting these if the two disagree. **Three of them
 had gone stale by a whole plan and were re-derived from `wc -l` in Plan 5 Task 5a**, so when you
@@ -1385,7 +1594,7 @@ reason `[digits]` is expanded by hand in that battery: a checklist derived from 
 passes by having nothing in it.
 
 A `[[preset]]` table joined this with the settings panel's Keys section, and it is the whole of
-the Mac/Windows toggle. Each row names the preset it belongs to, the modifier state, the Qt key,
+the four-value chooser SettingsKeys.html draws. Each row names the preset it belongs to, the modifier state, the Qt key,
 the chord as the Keys section prints it, the action and a label. The generator emits it twice
 from that one row: as `Keymap.PRESET_KEYS`, which the settings panel lists, and as the if-chain
 inside `Keymap.lookupPreset`, which `lookup()` consults before every shared table. Emitting both
@@ -1395,8 +1604,23 @@ the binding as a literal `Qt.Key_*` is what keeps it inside the `qml6` probe abo
 The live preset is a module-level `var preset` in the generated file, set by `ui/ViewState.qml`'s
 `onKeysPresetChanged`. A `.pragma library` holds one copy per QML engine, so that one assignment
 reaches every caller of `lookup()` with no second wire and no plumbing through `ui/js/Focus.js`
-or `ui/Pane.qml`, both of which sit against their file budget. An unrecognised name clamps to
-`mac`, which is what the shared tables were already written as: Finder's, with Cmd read as Ctrl.
+or `ui/Pane.qml`, both of which sit against their file budget. Every one of the four presets owns a
+row in that table. SettingsKeys.html's inventory gives `default` and `vim` a dash on the three view
+rows, but view switching is bound in no shared table, so a Default that overlaid nothing shipped
+with no keyboard route to the views at all; GM ruled on 2026-09-06 that both carry the Mac spelling,
+`ctrl-1`, `ctrl-2` and `ctrl-3`, which is safe because only one preset is ever live. Every other row
+a preset governs is already a bare shared key. `ui/ViewState.qml` is the validator: it resolves a
+stored name that is not in `Settings.PRESETS` to the first of them, `default`, so an unknown name,
+which would match no overlay row, never reaches the generated module.
+
+**A chord claimed twice inside one preset fails the build.** That is SettingsKeys.html's "Conflicts
+fail the build", and until this change it was not true: a second `mac` `ctrl-1` claiming `viewGrid`
+emitted two rows into `lookupPreset`'s if-chain, exited 0, and let the first silently win.
+`preset_conflict` keys on the preset with the modifier state and the Qt key, never the printed
+chord, because that is what the if-chain matches, and it names the preset, the chord and both
+actions. Two presets may hold the same chord, because only one is ever live. The tool takes the
+table to read as its second argument, so `tests/keymap-gen.sh` proves the refusal against a broken
+copy in its own probe directory rather than by editing the table this repo ships.
 
 **A preset overlay must never hold a chord the `[[sheet]]` table draws.** The sheet is one static
 array with no preset of its own, so a cap it draws for a Mac-only chord would be wrong for half
@@ -1456,6 +1680,18 @@ waits for its consumer.
   because `Drag.active = true` runs a nested event loop in which **the window receives no key
   events at all**, so the `Keys.onPressed` handler carrying ctrl never fired and every
   ctrl-copy silently became a move. The file still arrived, so nothing looked wrong.
+- **The copy modifier is read at the lift and nowhere else, and `tests/dragwire.sh` guards why.**
+  `Drag.supportedActions` is the only field an external client sees: Qt hands it straight to
+  Chromium as `effectAllowed`, and offering `Qt.MoveAction` alongside Copy made Chromium report
+  `dropEffect: move`, which Google's uploader refused. It is `Qt.CopyAction` alone now. Qt then
+  clamps a DragEvent's `proposedAction` to what the source advertised, so a copy-only source pins
+  that field to Copy and it can no longer carry Flea's own ctrl signal; the signal rides a marker
+  in the payload instead, computed at the lift. Combined with the nested event loop above, which
+  denies the window key events for the whole drag, that leaves no mechanism by which a ctrl pressed
+  after the drag begins can reach anything, so the status line says `ctrl at lift copies` rather
+  than advertising something the platform cannot do. `drag.sh` proves the behaviour but needs the
+  display and a real pointer, so `dragwire.sh` carries the four static checks into the headless
+  battery: put `Qt.MoveAction` back and every other suite stays green while Chromium breaks again.
 - **It drives the pointer through uinput, never `omarchy-drive drag`**, which cannot drive a Qt
   client at all: it interpolates through `hl.dsp.cursor.move`, which emits `wl_pointer.motion`
   with no `wl_pointer.frame`, and Qt dispatches buffered pointer events only on `frame`. A drag
@@ -3356,7 +3592,7 @@ mechanism under it. The simpler call is the right one.
 nothing foreign.** Today the only descendants are the backend and the `bwrap` thumbnailer children,
 both measured to pay nothing for it: `ffmpegthumbnailer` on a fixture clip ran 88 to 94 ms with huge
 pages on against 89 to 92 ms off over five interleaved pairs, output byte-identical. A foreign program
-CAN now be launched from the window, because Enter on a file runs `flea --open`, and the undo the
+CAN now be launched from the window, because Enter on most files runs `flea --open`, and the undo the
 corner asked for ships with it: `open::open` calls `thp::enable()`, which is
 `prctl(PR_SET_THP_DISABLE, 0, ...)`, in the `flea --open` process before it spawns `gio open`, so the
 opened program inherits huge pages back on. That call lives in `src/open.rs`, after the
@@ -3427,8 +3663,9 @@ all: a path that does not resolve gets `that file could not be opened, check tha
 `gio open` that exits nonzero gets `gio open refused that file, so no application on this system took
 it`, and a `gio` that could not be run at all gets `nothing on this system could be asked to open that
 file`, so the set tells a refused open from an unimplemented one and neither one blames the path. A directory is refused rather than handed on because
-`xdg-mime query default inode/directory` is `org.gnome.Nautilus.desktop` here, so opening one through
-the opener from inside a file manager opens a different file manager; the caller navigates instead.
+the desktop default for `inode/directory` is a file manager either way, `org.gnome.Nautilus.desktop`
+on an unclaimed box and `com.thisisgm.flea.desktop` once `--default` has claimed it, so opening one
+through the opener from inside a file manager opens a file manager; the caller navigates instead.
 `flea --open` with no path and `flea --open a b` both fall through to the unknown-flag branch, which
 names the flag and exits 2.
 
@@ -3456,9 +3693,43 @@ after the wait cleared produced the second call, so the drop is the guard and no
 Saying something in the status bar is what the tree now does. Bounding the wait was declined because
 a deadline above the measured range is a guess and one below it cuts off a legitimate cold start, and
 queueing was declined because it fires an open after the operator gave up and answers a double Enter
-on one archive with two windows. `Pane.openCursor` sends a row with `d` true to `open()` and every
-other row to the opener, so a symlink to a directory reaches the opener, comes back 3 and
-navigates; `tests/ui.sh open` asserts all three answers on one listing.
+on one archive with two windows. **Enter no longer reaches that wait on an archive at all**, which
+is the ruling below; the numbers stand as the cost of any `DBusActivatable` default and as what the
+guard exists for. `Pane.openCursor` sends a row with `d` true to `open()`, an archive to the preview
+and every other row to the opener, so a symlink to a directory reaches the opener, comes back 3 and
+navigates; `tests/ui.sh open` asserts all four answers on one listing.
+
+**Enter on an archive opens Flea's own view and launches nothing, which is the operator's ruling of
+2026-09-05.** `ui/js/Nav.js` `openCursor` carries one branch beside the directory branch: a row whose
+`Kinds.quickLookKind(row.i, path)` is `archive` goes to `pane.preview.open(path, row.i, row.s)`, the
+same call `ui/js/PreviewKeys.js` already makes for Space and `l`, so the three keys cannot disagree
+and the routing test is the same function `ui/Preview.qml` runs on the same two arguments a moment
+later. It is a route and not a mechanism: `ui/PreviewArchive.qml`, `ui/js/Archive.js` and
+`src/backend/archivelist.rs` already drew that frame and the wire already carried its index. The
+classifier is the icon rather than an extension table because the icon is what the frame itself
+reads; measured here, all eight extensions in `ui/js/Archive.js` resolve through
+`/usr/share/mime/globs2` to a type whose `/usr/share/mime/generic-icons` row is `package-x-generic`,
+and so do `.deb`, `.rpm`, `.jar`, `.cab`, `.gz` and `.xz`.
+
+**That one icon covers the whole Nautilus class on this box, derived rather than assumed.**
+`org.gnome.Nautilus.desktop` lists 26 `MimeType` entries; 25 resolve to it as the default and the
+26th is `inode/directory`, which `flea --default` has claimed. Of those 25, 20 carry
+`package-x-generic` in `generic-icons`, and the other five have no glob at all in `globs2`, so
+`src/backend/mime.rs`, which classifies by glob and by nothing else, cannot produce them for any
+filename. 89 `generic-icons` rows carry `package-x-generic`: 20 default to Nautilus, 69 have no
+default handler at all, and none defaults to anything else, so the branch takes over exactly the rows
+that used to open another file manager, plus rows `gio open` used to refuse.
+
+**The other half of that ruling was measured and then declined, and the expectation did not hold.**
+The candidate was resolving the handler in Flea and running `gio launch <desktop-file> <path>` in
+place of `gio open <path>`, on the theory that the default-handler machinery was pulling something
+extra in. Measured under `flock /tmp/flea-display.lock` on one real `text/plain` file, two
+repetitions of each arm plus a third pass with the whole session bus captured: both launchers
+produced the same process tree (`kitty -- nvim <path>` reparented to pid 1, with `nvim` and
+`nvim --embed` beneath it), both exited `0` in 8 to 10 ms, both made exactly one
+`org.freedesktop.DBus.StartServiceByName` call and both named `org.gtk.vfs.Daemon` in it, and neither
+produced a single line of bus traffic or one journal entry naming Nautilus. **They are the same on a
+text file, so `gio open` stays** and no desktop-entry parsing enters `src/open.rs`.
 
 **Issue 41: `xdg-open` does not honour `Terminal=true`, which is why the handoff is `gio open`.**
 `xdg-mime query default text/plain` is `nvim.desktop` here, whose `Exec` is `nvim %F` and whose

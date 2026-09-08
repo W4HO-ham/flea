@@ -68,7 +68,8 @@ QtObject {
     // every chord answers whether this is on or off.
     readonly property bool keyHints: root.state.keyHints === true
 
-    // "mac" or "windows", the Keys section's two-value toggle over the one generated key table.
+    // The Keys section's four-value chooser over the one generated key table, falling back to its
+    // first value, Default, which is what SettingsKeys.html says a missing or unknown name means.
     readonly property string keysPreset: Settings.contains(Settings.PRESETS, root.state.keys)
                                          ? root.state.keys : Settings.PRESETS[0]
 

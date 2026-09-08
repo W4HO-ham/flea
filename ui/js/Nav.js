@@ -2,6 +2,7 @@
 
 .import "DirSizes.js" as DirSizes
 .import "Filter.js" as Filter
+.import "Kinds.js" as Kinds
 .import "Thumbs.js" as Thumbs
 
 // Where the pane has been and how it gets back, taking ui/Pane.qml's root the way Search.js and
@@ -114,7 +115,60 @@ function renameRefreshTarget(pane, path) {
 function refresh(pane, selectPath) {
     pane.pendingSelect = selectPath ? selectPath : ""
     pane.pendingCursor = selectPath ? -1 : pane.cursorIndex
+    pane.pendingMenu = false
     openWithoutHistory(pane, pane.path, true)
+}
+
+// A change another program made under the open listing, unlike refresh() above which follows Flea's
+// own write. The rows are read again and the cursor is put back on the file it was on by name,
+// because a create above it renumbers every row below and a listing that jumped back to the top
+// would move the user while they were reading it. Returns the anchor applyAnchor() resolves, or null.
+function refreshWatched(pane) {
+    if (pane.listInFlight) {
+        return null
+    }
+    var row = pane.rowFor(pane.cursorIndex)
+    // The path rides along because the anchor can outlive one rows reply: a navigation between the
+    // two below would otherwise put this directory's cursor row onto the next directory's listing.
+    var anchor = { name: row ? String(row.n) : "", index: pane.cursorIndex, start: pane.held, path: pane.path }
+    var query = pane.filterQuery
+    pane.openWithoutHistory(pane.path)
+    // A filter narrows the rows the pane holds rather than choosing which directory it holds, so it
+    // survives a re-read of the same directory; every other caller of openWithoutHistory drops it.
+    pane.filterQuery = query
+    // The re-read answers from row 0, so a cursor deep in a large directory needs its own window back
+    // before the anchor's name can be looked for anywhere near where it was.
+    if (anchor.start > 0) {
+        pane.backend.window(anchor.start, pane.windowSize)
+    }
+    return anchor
+}
+
+// Runs on each rows reply while an anchor stands. The name can arrive in the listing's own first
+// window or in the one asked for above, so a miss in the first is not yet a miss. A name that is
+// gone from both leaves the old index, which keeps the view where the user left it.
+function applyAnchor(pane, anchor) {
+    if (!anchor) {
+        return null
+    }
+    if (pane.path !== anchor.path) {
+        return null
+    }
+    for (var i = 0; i < pane.rows.length; i++) {
+        if (String(pane.rows[i].n) === anchor.name) {
+            pane.setCursor(pane.held + i)
+            return null
+        }
+    }
+    // Still the first window rather than the one asked for above, so keep waiting, but only while that
+    // window can still exist: a listing that shrank past the offset comes back clamped to row 0 instead.
+    if (anchor.start > 0 && pane.held === 0 && pane.total > anchor.start) {
+        return anchor
+    }
+    if (pane.total > 0) {
+        pane.setCursor(Math.min(anchor.index, pane.total - 1))
+    }
+    return null
 }
 
 // Only the first rows response looks for the target, then it is forgotten either way, so a later
@@ -139,13 +193,19 @@ function applyPendingSelect(pane) {
             pane.selection.only(index)
             pane.selectionAnchor = index
             pane.selectionVersion++
+            if (pane.pendingMenu) {
+                pane.pendingMenu = false
+                pane.openCursorMenu()
+            }
             return
         }
     }
+    // The row is not in this listing, so the intent behind it must not fire on some later match.
+    pane.pendingMenu = false
 }
 
-// Enter on the cursor row: a directory is navigated into, a file is handed to the opener. The
-// in-flight guard is what stops a second Enter queueing a listing behind one already asked for.
+// Enter on the cursor row: a directory navigates, an archive opens Flea's own view, anything else
+// goes to the opener. The in-flight guard is what stops a second Enter queueing a second listing.
 function openCursor(pane, opener) {
     if (pane.listInFlight) {
         pane.message("A directory is already loading.", false)
@@ -159,6 +219,11 @@ function openCursor(pane, opener) {
     var path = pane.join(pane.path, row.n)
     if (row.d) {
         pane.open(path)
+        return
+    }
+    // Handing an archive on opens another file manager, and this is ui/Preview.qml's own classifier.
+    if (Kinds.quickLookKind(row.i, path) === Kinds.ARCHIVE) {
+        pane.preview.open(path, row.i, row.s)
         return
     }
     opener.open(path)

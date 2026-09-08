@@ -20,7 +20,8 @@ pub fn exec_qs(ui: &Path, start: Option<&str>, select: Option<&str>) -> i32 {
 // flea --pick <reply>: the picker window tools/flea-portal opens for one portal request. Same shell
 // and the same renderer choice, on a second entry point, so a chooser is not a second application.
 pub fn pick(reply: &str) -> i32 {
-    if std::env::var_os("FLEA_PICKER").is_none() {
+    // Empty is absent, the rule paths::has_display() applies: a wrapper's unset variable is not a request.
+    if !std::env::var_os("FLEA_PICKER").is_some_and(|value| !value.is_empty()) {
         eprintln!("flea: --pick needs FLEA_PICKER, the portal request tools/flea-portal puts in the environment");
         return 2;
     }

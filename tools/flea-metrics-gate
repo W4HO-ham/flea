@@ -71,6 +71,7 @@ fi
 # key|contract value|derivation. The four column widths depend on the family, which is why family is first.
 contract="family|JetBrainsMono Nerd Font|fc-match monospace, Style.font.resolvedFamily
 baseSize|14|[font] base-size in the user's shell.toml, layered over the theme's
+body|14|round(14 x 1.0), Style.font.body, what running text draws at
 bodySmall|13|round(14 x 0.917)
 caption|12|round(14 x 0.833)
 lineBoxRatio|1.8|Flea constant, leading above and below

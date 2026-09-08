@@ -1,15 +1,22 @@
 .pragma library
 
 // Generated from keys.toml by tools/flea-keymap-gen. Do not edit.
-// The selected Mac/Windows preset. A .pragma library holds one copy per QML engine, so
+// The selected keybinding preset. A .pragma library holds one copy per QML engine, so
 // ui/ViewState.qml sets it once and every caller of lookup() below follows without a
-// second wire; an unknown name falls back to mac rather than leaving the map empty.
-var preset = "mac"
-function setPreset(name) { preset = name === "windows" ? "windows" : "mac" }
+// second wire; it is also the validator, resolving a stored name this build does not
+// have to default before it gets here, because an unknown name matches no overlay row.
+var preset = "default"
+function setPreset(name) { preset = name }
 
 // The [[preset]] rows of keys.toml, for ui/SettingsPanel.qml's Keys section. code is the Qt
 // name the overlay below matches on, so a row here and the binding are the same keys.toml row.
 var PRESET_KEYS = [
+    { preset: "default", ctrl: true, shift: false, code: "Key_1", keys: "ctrl-1", action: "viewList", label: "list view" },
+    { preset: "default", ctrl: true, shift: false, code: "Key_2", keys: "ctrl-2", action: "viewColumns", label: "columns view" },
+    { preset: "default", ctrl: true, shift: false, code: "Key_3", keys: "ctrl-3", action: "viewGrid", label: "grid view" },
+    { preset: "vim", ctrl: true, shift: false, code: "Key_1", keys: "ctrl-1", action: "viewList", label: "list view" },
+    { preset: "vim", ctrl: true, shift: false, code: "Key_2", keys: "ctrl-2", action: "viewColumns", label: "columns view" },
+    { preset: "vim", ctrl: true, shift: false, code: "Key_3", keys: "ctrl-3", action: "viewGrid", label: "grid view" },
     { preset: "mac", ctrl: true, shift: false, code: "Key_1", keys: "ctrl-1", action: "viewList", label: "list view" },
     { preset: "mac", ctrl: true, shift: false, code: "Key_2", keys: "ctrl-2", action: "viewColumns", label: "columns view" },
     { preset: "mac", ctrl: true, shift: false, code: "Key_3", keys: "ctrl-3", action: "viewGrid", label: "grid view" },
@@ -27,6 +34,12 @@ var PRESET_KEYS = [
 function lookupPreset(name, key, text, modifiers) {
     var ctrl = (modifiers & Qt.ControlModifier) !== 0
     var shift = (modifiers & Qt.ShiftModifier) !== 0
+    if (name === "default" && ctrl && !shift && key === Qt.Key_1) return "viewList"
+    if (name === "default" && ctrl && !shift && key === Qt.Key_2) return "viewColumns"
+    if (name === "default" && ctrl && !shift && key === Qt.Key_3) return "viewGrid"
+    if (name === "vim" && ctrl && !shift && key === Qt.Key_1) return "viewList"
+    if (name === "vim" && ctrl && !shift && key === Qt.Key_2) return "viewColumns"
+    if (name === "vim" && ctrl && !shift && key === Qt.Key_3) return "viewGrid"
     if (name === "mac" && ctrl && !shift && key === Qt.Key_1) return "viewList"
     if (name === "mac" && ctrl && !shift && key === Qt.Key_2) return "viewColumns"
     if (name === "mac" && ctrl && !shift && key === Qt.Key_3) return "viewGrid"

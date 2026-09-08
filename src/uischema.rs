@@ -25,7 +25,7 @@ pub const DEFAULTS: &str = r#"{
     "thumbnails": "media", "thumbSize": "medium",
     "ctrlZoom": true
   },
-  "keys": "mac",
+  "keys": "default",
   "display": { "textSize": { "mode": "system" } },
   "menu": { "hidden": ["delete", "openwith", "openTerminal",
             "moveto", "copyto", "properties", "permissions", "copypath"] }
@@ -108,9 +108,9 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     ("keyHints", Rule::Bool),
     ("places", Rule::Group(PLACES)),
     ("preview", Rule::Group(PREVIEW)),
-    // ui/js/Keymap.js holds one table with a Mac and a Windows overlay, so those are the two values
-    // this Flea can honour; a preset system with no table behind it would be a setting and no feature.
-    ("keys", Rule::Word(&["mac", "windows"])),
+    // SettingsKeys.html's four-value chooser over ui/js/Keymap.js's shared tables. A stored name
+    // this build cannot honour falls back to default, which is also what a fresh ui.json holds.
+    ("keys", Rule::Word(&["default", "vim", "mac", "windows"])),
     ("display", Rule::Group(DISPLAY)),
     ("menu", Rule::Group(MENU)),
 ];
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(d.get("view").and_then(Json::as_str), Some("list"));
         assert_eq!(d.get("density").and_then(Json::as_str), Some("normal"));
         assert_eq!(d.get("addressBar").and_then(Json::as_str), Some("breadcrumb"));
-        assert_eq!(d.get("keys").and_then(Json::as_str), Some("mac"));
+        assert_eq!(d.get("keys").and_then(Json::as_str), Some("default"));
         assert_eq!(d.get("foldersFirst").and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("groupByKind").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("hidden").and_then(Json::as_bool), Some(false));
@@ -212,12 +212,13 @@ mod tests {
         );
     }
 
-    // The rules nothing else reached: an exact stop, a non-empty path, and the two shipped presets.
+    // The rules nothing else reached: an exact stop, a non-empty path, and the four shipped presets.
     #[test]
     fn the_stop_the_preset_and_the_favourites_rules_each_bite_at_their_own_edge() {
         let current = crate::uistate::from_file("{}");
         let takes = |patch: &str| crate::uistate::patched(&current, &jsondoc::parse(patch).expect("patch parses"));
         for good in [r#"{"display":{"textSize":{"mode":"system"}}}"#, r#"{"display":{"textSize":{"mode":9}}}"#,
+                     r#"{"keys":"default"}"#, r#"{"keys":"vim"}"#,
                      r#"{"keys":"mac"}"#, r#"{"keys":"windows"}"#,
                      r#"{"places":{"favourites":[]}}"#] {
             assert!(takes(good).is_ok(), "{} is a value its key takes", good);
@@ -229,7 +230,7 @@ mod tests {
                              (r#"{"display":{"opacity":1.0}}"#, "display.opacity"),
                              (r#"{"display":{"shadows":true}}"#, "display.shadows"),
                              (r#"{"menu":{"basic":false}}"#, "menu.basic"),
-                             (r#"{"keys":"vim"}"#, "keys"),
+                             (r#"{"keys":"emacs"}"#, "keys"),
                              (r#"{"language":"en"}"#, "language"),
                              (r#"{"places":{"favourites":[""]}}"#, "places.favourites"),
                              (r#"{"places":{"favourites":"/a"}}"#, "places.favourites")] {

@@ -94,7 +94,7 @@ Item {
         text: root.modelData.label
         color: Theme.color.foreground
         font.family: Theme.font.family
-        font.pixelSize: Theme.font.bodySmall
+        font.pixelSize: Theme.font.body
         elide: Text.ElideRight
         textFormat: Text.PlainText
     }

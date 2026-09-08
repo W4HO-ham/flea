@@ -16,9 +16,38 @@ Item {
     id: root
 
     property var pane: null
+
+    // The listing's floor as a drop target, under the rows: a drop past the last row, or one a file
+    // row refused, lands in the directory being shown. Declared first in ui/Pane.qml, so it sits below.
+    // corner: the list view only. Grid tiles and columns have no row targets yet, so a folder tile
+    // would land its drop beside itself, and a search listing's path is the walk scope, not a row's home.
+    Flea.DropInto {
+        x: root.pane ? root.pane.listSlot.x : 0
+        y: root.pane ? root.pane.listSlot.y : 0
+        width: root.pane ? root.pane.listSlot.width : 0
+        height: root.pane ? root.pane.listSlot.height : 0
+        enabled: root.pane !== null && root.pane.viewMode === "list" && root.pane.searchMode === ""
+        pane: root.pane
+        dest: root.pane ? root.pane.path : ""
+        // Unknown until the listed reply lands, because dirDev is still the directory being left.
+        destDev: root.pane && root.pane.backend && !root.pane.listInFlight ? root.pane.backend.dirDev : 0
+    }
     // The new folder has no row until the refresh lands, so the editor is opened on the rows reply
     // that carries it rather than on the made line that asked for it. Holds that folder's full path.
     property string renameOnArrival: ""
+    // A watched change landed while one of the states below owned the rows, so the re-read is owed.
+    property bool stale: false
+    // What the cursor sat on across a watched re-read, or null; ui/js/Nav.js owns both ends of it.
+    property var anchor: null
+    // One burst of writes is one re-read: the timer absorbs later notifications instead of being
+    // restarted by them, so a directory under continuous change settles rather than never firing.
+    readonly property int watchMs: 400
+    // A re-read replaces every row, so it waits for the states that name a row by index or hold one
+    // open: an editor, the menu over a row, a filter being typed, a search listing, a selection whose
+    // indices would name other files afterwards, and a list already in flight.
+    readonly property bool watchBusy: !pane || pane.listInFlight || pane.renamingIndex >= 0
+            || pane.menuVisible || pane.filterTyping || pane.searchMode.length > 0
+            || pane.selectionCount() > 0
     // ui/Pane.qml reaches the three through these: openCursor takes the opener, the menu reads the
     // Taildrop peers, and the two share actions call the other two.
     readonly property alias opener: opener
@@ -48,6 +77,38 @@ Item {
         // minutes, not the scale of opening a context menu, and refreshing on open would make
         // the menu's own height (and the clamp openAt applies) depend on an async reply.
         Component.onCompleted: refresh()
+    }
+
+    // The owed re-read, run when nothing is holding the rows. A refusal keeps the debt rather than
+    // dropping it, and watchBusy going false below is what pays it.
+    function reread() {
+        if (root.watchBusy)
+            return
+        root.stale = false
+        root.anchor = Nav.refreshWatched(pane)
+    }
+
+    // The owed re-read goes through the timer rather than straight out of this handler: reading
+    // watchBusy back inside its own change notification re-enters the binding, which Qt reports as a
+    // binding loop, and reread() writes listInFlight, which watchBusy reads.
+    onWatchBusyChanged: if (root.stale && !watchSettle.running) watchSettle.start()
+
+    Timer {
+        id: watchSettle
+        interval: root.watchMs
+        repeat: false
+        onTriggered: root.reread()
+    }
+
+    // A debt owed for the directory the pane has left is not owed by the one it arrived in: without
+    // this, a change in A held back by a selection is paid by a full re-list of B.
+    Connections {
+        target: pane
+        function onPathChanged() {
+            root.stale = false
+            root.anchor = null
+            watchSettle.stop()
+        }
     }
 
     // Only when the cursor really landed on the folder that was made: on a listing wider than the
@@ -94,6 +155,7 @@ Item {
             if (pane.rowsAt === 0 && pane.inputAt > 0 && pane.rowFor(pane.cursorIndex))
                 pane.rowsAt = Date.now()
             pane.applyPendingSelect()
+            root.anchor = Nav.applyAnchor(pane, root.anchor)
             Tabs.applyPending(pane)
             root.openRenameOnArrival()
             pane.listArea.restartSettle()
@@ -133,6 +195,17 @@ Item {
             // fix that: it asks for a window only on drift, and a full held one drifts on neither edge.
             Search.ranked(pane)
             pane.listArea.restartSettle()
+        }
+
+        // Sample input: {"t":"changed","path":"/home/gm/Downloads"}
+        // Unsolicited, and the only line here that is: the listed directory changed under the pane.
+        function onChanged(path) {
+            // A notification for a directory the pane has already left says nothing about this one.
+            if (path !== pane.path)
+                return
+            root.stale = true
+            if (!watchSettle.running)
+                watchSettle.start()
         }
 
         // A thumbed line for the previous listing is still in the pipe when open() clears the map.
@@ -250,6 +323,8 @@ Item {
         }
 
         function onFailed(where, input, message, mode) {
+            // A listing that failed cannot seat the row a peeked right click asked for, so its menu intent dies here.
+            pane.pendingMenu = false
             var text = Errors.sentence(where, message)
             // A refused sort changes nothing in the backend, so it changes nothing here: a notice in the
             // plain role, never the error role, which is for a listing that stopped being true.
