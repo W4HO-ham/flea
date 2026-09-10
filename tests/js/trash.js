@@ -51,6 +51,10 @@ function run(check) {
     picked.trashArmedAt = Date.now()
     Trash.arm(picked)
     check("the pair trashes the selection when there is one", picked.trashedIdx.join(","), "1,4")
+    // The reply puts the cursor on the block's first row, so the request records it: the cursor is
+    // free to move while the backend works, and where it is by then is not where the rows left from.
+    check("and the request remembers the first row it asked for", picked.trashedFirst, 1)
+    check("as does a plain Delete", direct.trashedFirst, 3)
 
     // The rows the views tint while the pair is armed are exactly the rows the second d would take.
     var bare = { cursorIndex: 3, selectionCount: function () { return 0 }, isSelected: function (i) { return false } }
